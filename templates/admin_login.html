@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VPN Admin Login</title>
+  <style>
+    :root {
+      --line: rgba(148, 163, 184, 0.2);
+      --text: #e5edf8;
+      --muted: #90a2bd;
+      --shadow: 0 20px 40px rgba(0,0,0,.35);
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI Variable", "Segoe UI", "Trebuchet MS", sans-serif;
+      background:
+        radial-gradient(900px 500px at 8% -10%, rgba(47,124,255,0.16), transparent 60%),
+        radial-gradient(900px 500px at 100% 0%, rgba(34,197,94,0.08), transparent 55%),
+        linear-gradient(180deg, #060b16 0%, #050915 100%);
+      color: var(--text);
+      margin: 0;
+    }
+    .wrap { min-height: 100vh; display: grid; place-items: center; padding: 18px; }
+    .shell {
+      width: 100%; max-width: 980px; display: grid; grid-template-columns: 1.05fr .95fr;
+      border: 1px solid var(--line); border-radius: 18px; overflow: hidden;
+      background: rgba(255,255,255,0.02); box-shadow: var(--shadow); backdrop-filter: blur(8px);
+    }
+    .hero {
+      padding: 28px; border-right: 1px solid var(--line);
+      background: radial-gradient(420px 220px at 20% 10%, rgba(47,124,255,0.18), transparent 70%), rgba(7, 13, 26, 0.92);
+      display: grid; align-content: space-between; gap: 16px; min-height: 420px;
+    }
+    .hero h1 { margin: 0; font-size: 28px; line-height: 1.15; }
+    .hero p { margin: 0; color: var(--muted); line-height: 1.5; }
+    .hero-grid { display: grid; gap: 10px; }
+    .hero-item { padding: 10px 12px; border: 1px solid rgba(148,163,184,.14); border-radius: 12px; background: rgba(255,255,255,.02); }
+    .hero-item .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+    .hero-item .v { margin-top: 4px; font-size: 14px; font-weight: 600; }
+    .card { background: rgba(13, 24, 47, 0.93); padding: 26px; display: grid; align-content: center; }
+    .card h2 { margin: 0 0 6px; font-size: 22px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+    label { display: block; margin: 10px 0 6px; font-size: 13px; color: #cbd5e1; }
+    input {
+      width: 100%; background: #0b1220; color: var(--text); border: 1px solid #334155;
+      border-radius: 10px; padding: 11px 12px; outline: none;
+    }
+    input:focus { border-color: rgba(99,145,255,.6); box-shadow: 0 0 0 3px rgba(47,124,255,.12); }
+    button {
+      margin-top: 14px; width: 100%; border: 1px solid rgba(99,145,255,.45);
+      background: linear-gradient(180deg, #2b6bff, #1f55d6); color: white; padding: 11px 12px;
+      border-radius: 10px; cursor: pointer; font-weight: 600;
+    }
+    .hint { margin-top: 10px; font-size: 12px; color: var(--muted); }
+    .error {
+      margin-top: 12px; color: #ffc0c0; font-size: 13px; border: 1px solid rgba(239,68,68,.32);
+      background: rgba(69,10,10,.55); border-radius: 10px; padding: 10px 12px;
+      display: {% if error_text %}block{% else %}none{% endif %};
+    }
+    @media (max-width: 860px) {
+      .shell { grid-template-columns: 1fr; }
+      .hero { border-right: 0; border-bottom: 1px solid var(--line); min-height: auto; padding: 18px; }
+      .card { padding: 18px; }
+      .hero h1 { font-size: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="shell">
+      <div class="hero">
+        <div>
+          <h1>TrumpVPN Admin</h1>
+          <p>Единая админ-панель для управления пользователями, платежами, промокодами и VPN-нодами.</p>
+        </div>
+        <div class="hero-grid">
+          <div class="hero-item"><div class="k">Admin ID</div><div class="v">{{ admin_telegram_id }}</div></div>
+          <div class="hero-item"><div class="k">Session</div><div class="v">{{ admin_session_hours }}h cookie</div></div>
+          <div class="hero-item"><div class="k">Access</div><div class="v">Local admin authentication</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Login</h2>
+        <div class="sub">Введите Telegram ID администратора и пароль панели.</div>
+        <form method="post" action="/admin/login">
+          <label>Admin Telegram ID</label>
+          <input type="text" name="admin_id" value="{{ admin_telegram_id }}" required />
+          <label>Password</label>
+          <input type="password" name="password" placeholder="Пароль админки" required />
+          <button type="submit">Войти</button>
+        </form>
+        <div class="hint">Подсказка: используется cookie-сессия `{{ admin_cookie }}` после успешного входа.</div>
+        <div class="error">{{ error_text|e }}</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
