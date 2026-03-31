@@ -36,7 +36,8 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -85,6 +86,7 @@ class Settings(BaseSettings):
     welcome_bonus_days: int = 3
     welcome_channel_url: str = "https://t.me/trumpxvpn"
     welcome_channel_chat: str = "@trumpxvpn"
+    public_bot_url: str = "https://t.me/trumpvlessbot"
     payments_notify_chat_id: int = -1003861242059
     happ_import_url_template: str = "happ://add?url={url}"
     happ_download_url: str = "https://happ.su"
@@ -2671,6 +2673,12 @@ def serialize_user(user: User | None, invited_count: int = 0, referral_bonus_rub
 
 
 app = FastAPI(title="VPN One File", version="0.1.0")
+PUBLIC_UI_DIST_DIR = Path(__file__).resolve().parent / "public-ui" / "dist"
+PUBLIC_UI_INDEX_FILE = PUBLIC_UI_DIST_DIR / "index.html"
+PUBLIC_UI_ASSETS_DIR = PUBLIC_UI_DIST_DIR / "assets"
+if PUBLIC_UI_ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(PUBLIC_UI_ASSETS_DIR)), name="public_ui_assets")
+
 api_users = APIRouter(prefix="/api/users", tags=["users"])
 api_servers = APIRouter(prefix="/api/servers", tags=["servers"])
 api_configs = APIRouter(prefix="/api/configs", tags=["configs"])
@@ -2688,20 +2696,47 @@ def startup_event():
     _start_background_tasks()
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+def _public_ui_index_response() -> HTMLResponse | FileResponse:
+    if not PUBLIC_UI_INDEX_FILE.exists():
+        return HTMLResponse(
+            "<h1>Public UI is not built</h1><p>Run: cd public-ui && npm install && npm run build</p>",
+            status_code=503,
+        )
+    return FileResponse(str(PUBLIC_UI_INDEX_FILE), media_type="text/html", headers={"Cache-Control": "no-store"})
 
 
-@app.get("/sub/{telegram_id}/{token}", response_class=PlainTextResponse)
-def user_subscription(
+def _public_subscription_page_url(request: Request, telegram_id: int, token: str) -> str:
+    base = f"{public_api_base_url()}/subscription/{int(telegram_id)}/{token}"
+    params: dict[str, str] = {k: str(v) for k, v in request.query_params.items()}
+    params.pop("preview", None)
+    params.pop("fmt", None)
+    if not params:
+        return base
+    return f"{base}?{urlencode(params)}"
+
+
+@dataclass
+class SubscriptionPreparedData:
+    telegram_id: int
+    token: str
+    user: User
+    active_configs: list[ClientConfig]
+    links: list[str]
+    fmt_norm: str
+    upload: int
+    download: int
+    expire_ts: int
+    days_left: int
+
+
+def _prepare_user_subscription_data(
+    db: Session,
     telegram_id: int,
     token: str,
     request: Request,
     fmt: str = "b64",
     with_stats: int = 1,
-    db: Session = Depends(get_db),
-):
+) -> SubscriptionPreparedData:
     if telegram_id <= 0 or not verify_user_subscription_token(telegram_id, token):
         raise HTTPException(status_code=404, detail="Subscription not found")
     user = fetch_user_with_configs(db, telegram_id)
@@ -2719,8 +2754,6 @@ def user_subscription(
 
     client_app_name = _subscription_client_app_name(str(request.headers.get("user-agent", "") or "")) if request else "client"
     fmt_norm = str(fmt or "").strip().lower()
-    # HApp deeplink import is unreliable with raw payloads on some versions.
-    # Force b64 on the server side too, so old/stale deeplinks with fmt=raw still work.
     if client_app_name == "happ" and fmt_norm in {"raw", "plain", "txt"}:
         fmt_norm = "b64"
 
@@ -2728,8 +2761,6 @@ def user_subscription(
     active_configs = _active_subscription_configs(user, max_configs)
     requested_device_name = _derive_device_name_from_subscription_request(request) if request else None
 
-    # Auto-attach one device config when subscription link is imported in client apps
-    # (e.g. HApp) or when explicit device params are present in the URL.
     if request and requested_device_name:
         requested_key = _device_name_key(requested_device_name)
         active_device_keys_all = {
@@ -2738,8 +2769,6 @@ def user_subscription(
             if cfg.is_active and cfg.server and bool(cfg.server.enabled) and _device_name_key(cfg.device_name)
         }
         if requested_key not in active_device_keys_all and len(active_device_keys_all) >= max_configs:
-            # HApp shows generic "Protocol is unknown" for non-200 responses during import.
-            # Fallback to existing active payload instead of returning 403 to the client.
             if client_app_name == "happ":
                 requested_device_name = None
             else:
@@ -2755,7 +2784,6 @@ def user_subscription(
             if requested_configs:
                 active_configs = sorted(requested_configs, key=lambda cfg: cfg.created_at, reverse=True)
             else:
-                # Fallback for clients that rotate or mutate device tokens between requests.
                 active_configs = _active_subscription_configs(user, max_configs)
 
     if not active_configs:
@@ -2766,18 +2794,17 @@ def user_subscription(
 
     upload = 0
     download = 0
-    traffic_configs = [
-        cfg for cfg in list(user.configs or [])
-        if cfg.is_active and cfg.server
-    ]
-    try:
-        upload, download = _aggregate_user_traffic_bytes(
-            traffic_configs,
-            total_timeout_seconds=1.6,
-            per_server_timeout_seconds=0.7,
-        )
-    except Exception:
-        upload, download = 0, 0
+    if int(with_stats or 0) > 0:
+        traffic_configs = [cfg for cfg in list(user.configs or []) if cfg.is_active and cfg.server]
+        try:
+            upload, download = _aggregate_user_traffic_bytes(
+                traffic_configs,
+                total_timeout_seconds=1.6,
+                per_server_timeout_seconds=0.7,
+            )
+        except Exception:
+            upload, download = 0, 0
+
     expire_ts = 0
     if user.subscription_until:
         expire_ts = int(user.subscription_until.replace(tzinfo=timezone.utc).timestamp())
@@ -2787,35 +2814,171 @@ def user_subscription(
         if delta > 0:
             days_left = max(1, int((delta + 86399) // 86400))
 
-    if _is_browser_subscription_preview_request(request, fmt):
-        preview_html = _render_subscription_preview_page(
-            request=request,
-            telegram_id=telegram_id,
-            token=token,
-            user=user,
-            active_configs=active_configs,
-            links_count=len(links),
-            days_left=days_left,
-            expire_ts=expire_ts,
-            upload=upload,
-            download=download,
-        )
-        return HTMLResponse(preview_html, headers={"Cache-Control": "no-store"})
+    return SubscriptionPreparedData(
+        telegram_id=int(telegram_id),
+        token=str(token),
+        user=user,
+        active_configs=list(active_configs),
+        links=list(links),
+        fmt_norm=fmt_norm,
+        upload=int(upload),
+        download=int(download),
+        expire_ts=int(expire_ts),
+        days_left=int(days_left),
+    )
 
-    payload = "\n".join(links)
-    if fmt_norm in {"raw", "plain", "txt"}:
+
+def _build_subscription_preview_payload(request: Request, prepared: SubscriptionPreparedData) -> dict[str, Any]:
+    telegram_id = int(prepared.telegram_id)
+    token = str(prepared.token)
+    user = prepared.user
+    active_configs = prepared.active_configs
+
+    subscription_url = _subscription_variant_url(request, telegram_id, token, fmt=None, preview="1")
+    raw_url = _subscription_variant_url(request, telegram_id, token, fmt="raw", preview="0")
+    b64_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0")
+    stats_url = _public_subscription_page_url(request, telegram_id, token)
+
+    happ_import_url = ""
+    happ_payload_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0")
+    try:
+        happ_import_url = str(settings.happ_import_url_template or "").format(
+            url=quote(happ_payload_url, safe=""),
+            raw_url=happ_payload_url,
+        )
+    except Exception:
+        happ_import_url = ""
+
+    expire_text = "-"
+    if prepared.expire_ts > 0:
+        try:
+            expire_text = datetime.fromtimestamp(prepared.expire_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            expire_text = str(prepared.expire_ts)
+
+    device_names = sorted(
+        {
+            str(cfg.device_name or "").strip()
+            for cfg in active_configs
+            if str(cfg.device_name or "").strip()
+        }
+    )
+    server_names = sorted(
+        {
+            str(cfg.server.name or "").strip()
+            for cfg in active_configs
+            if getattr(cfg, "server", None) and str(cfg.server.name or "").strip()
+        }
+    )
+
+    return {
+        "status": "ok",
+        "metrics": {
+            "subscription_active": bool(is_subscription_active(user)),
+            "days_left": int(prepared.days_left),
+            "servers_count": int(len(prepared.links)),
+            "devices_count": int(len(device_names)),
+            "traffic_used_text": _format_bytes_short(int(prepared.upload or 0) + int(prepared.download or 0)),
+            "expires_text": expire_text,
+        },
+        "links": {
+            "subscription_url": subscription_url,
+            "raw_url": raw_url,
+            "b64_url": b64_url,
+            "stats_url": stats_url,
+            "happ_import_url": happ_import_url,
+            "happ_download_url": str(settings.happ_download_url or ""),
+        },
+        "account": {
+            "telegram_id": int(user.telegram_id or 0),
+            "username": str(user.username or ""),
+            "balance_rub": int(user.balance_rub or 0),
+        },
+        "devices": device_names,
+        "servers": server_names,
+    }
+
+
+@app.get("/")
+def public_landing_page():
+    return _public_ui_index_response()
+
+
+@app.get("/subscription/{telegram_id}/{token}")
+def public_subscription_page(telegram_id: int, token: str):
+    _ = telegram_id, token
+    return _public_ui_index_response()
+
+
+@app.get("/api/public/config")
+def public_config_api():
+    return {
+        "brand": "TrumpVPN",
+        "bot_url": str(settings.public_bot_url or "https://t.me/trumpvlessbot").strip() or "https://t.me/trumpvlessbot",
+    }
+
+
+@app.get("/api/public/subscription/{telegram_id}/{token}")
+def public_subscription_preview_api(
+    telegram_id: int,
+    token: str,
+    request: Request,
+    fmt: str = "b64",
+    with_stats: int = 1,
+    db: Session = Depends(get_db),
+):
+    prepared = _prepare_user_subscription_data(
+        db=db,
+        telegram_id=telegram_id,
+        token=token,
+        request=request,
+        fmt=fmt,
+        with_stats=with_stats,
+    )
+    return _build_subscription_preview_payload(request, prepared)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/sub/{telegram_id}/{token}", response_class=PlainTextResponse)
+def user_subscription(
+    telegram_id: int,
+    token: str,
+    request: Request,
+    fmt: str = "b64",
+    with_stats: int = 1,
+    db: Session = Depends(get_db),
+):
+    prepared = _prepare_user_subscription_data(
+        db=db,
+        telegram_id=telegram_id,
+        token=token,
+        request=request,
+        fmt=fmt,
+        with_stats=with_stats,
+    )
+
+    if _is_browser_subscription_preview_request(request, fmt):
+        target = _public_subscription_page_url(request, prepared.telegram_id, prepared.token)
+        return RedirectResponse(target, status_code=307)
+
+    payload = "\n".join(prepared.links)
+    if prepared.fmt_norm in {"raw", "plain", "txt"}:
         response_payload = payload
     else:
         response_payload = base64.b64encode(payload.encode("utf-8")).decode("utf-8")
 
     profile_title = (
-        f"TrumpVPN | days={days_left} | used={_format_bytes_short(upload + download)} | "
-        f"servers={len(links)}"
+        f"TrumpVPN | days={prepared.days_left} | used={_format_bytes_short(prepared.upload + prepared.download)} | "
+        f"servers={len(prepared.links)}"
     )
     profile_title_b64 = base64.b64encode(profile_title.encode("utf-8")).decode("ascii")
     headers = {
         "Cache-Control": "no-store",
-        "Subscription-Userinfo": f"upload={upload}; download={download}; total=0; expire={expire_ts}",
+        "Subscription-Userinfo": f"upload={prepared.upload}; download={prepared.download}; total=0; expire={prepared.expire_ts}",
         "Profile-Title": f"base64:{profile_title_b64}",
         "Profile-Update-Interval": "1",
     }

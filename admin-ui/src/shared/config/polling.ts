@@ -1,0 +1,2 @@
+﻿export const ADMIN_AUTO_REFRESH_MS = 30000;
+export const ADMIN_AUTO_REFRESH_SECONDS = Math.floor(ADMIN_AUTO_REFRESH_MS / 1000);

@@ -8,8 +8,11 @@ import {
 import { submitAdminActionSafely } from "../../shared/api/adminAction";
 import { isUnauthorizedError } from "../../shared/api/httpClient";
 import { ROUTES } from "../../shared/config/routes";
+import { ADMIN_AUTO_REFRESH_MS, ADMIN_AUTO_REFRESH_SECONDS } from "../../shared/config/polling";
 import { useFlash } from "../../shared/hooks/useFlash";
 import { PageSection } from "../../shared/ui/PageSection";
+import { LineChart } from "../../shared/ui/LineChart";
+import { BarChart } from "../../shared/ui/BarChart";
 
 function toInt(value: string | undefined): number {
   const parsed = Number(value || "0");
@@ -35,7 +38,7 @@ export function ServerDetailPage() {
 
   const [pending, setPending] = useState(false);
   const [checkPending, setCheckPending] = useState(false);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [detail, setDetail] = useState<AdminServerDetail | null>(null);
 
   const server = detail?.server ?? null;
@@ -75,7 +78,7 @@ export function ServerDetailPage() {
     }
     const timer = window.setInterval(() => {
       void load();
-    }, 12000);
+    }, ADMIN_AUTO_REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [autoRefresh, load]);
 
@@ -156,12 +159,28 @@ export function ServerDetailPage() {
     }
   }
 
-  const historyRows = useMemo(() => {
+  const chartData = useMemo(() => {
+    const latencyPoints = (detail?.latency_points || []).slice(-20).map((row) => ({
+      label: String(row.ts || ""),
+      value: Number(row.latency_ms || 0),
+    }));
+    const loadPoints = (detail?.load_points || []).slice(-20).map((row) => ({
+      label: String(row.ts || ""),
+      value: Number(row.load1 || 0),
+    }));
+    const connectionPoints = (detail?.connection_points || []).slice(-20).map((row) => ({
+      label: String(row.ts || ""),
+      value: Number(row.established_connections || 0),
+    }));
+    const dailyPoints = (detail?.daily_points || []).slice(-14).map((row) => ({
+      label: String(row.day || "").slice(5),
+      value: Number(row.count || 0),
+    }));
     return {
-      latency: (detail?.latency_points || []).slice(-20).reverse(),
-      load: (detail?.load_points || []).slice(-20).reverse(),
-      connections: (detail?.connection_points || []).slice(-20).reverse(),
-      daily: (detail?.daily_points || []).slice(-14).reverse(),
+      latency: latencyPoints,
+      load: loadPoints,
+      connections: connectionPoints,
+      daily: dailyPoints,
     };
   }, [detail]);
 
@@ -182,7 +201,7 @@ export function ServerDetailPage() {
           </button>
           <label className="toggle-field">
             <input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
-            <span>Auto refresh (12s)</span>
+            <span>{`Auto refresh (${ADMIN_AUTO_REFRESH_SECONDS}s)`}</span>
           </label>
         </div>
       }
@@ -439,36 +458,30 @@ export function ServerDetailPage() {
           <div className="split-2" style={{ marginTop: 14 }}>
             <section className="subpanel">
               <div className="subpanel-head">
-                <h3>Latency / Load / Connections (last 20)</h3>
+                <h3>Runtime Trends (last 20 samples)</h3>
               </div>
-              <div className="table-shell">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Time</th>
-                      <th>Latency ms</th>
-                      <th>Load1</th>
-                      <th>Established</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {historyRows.latency.map((row, index) => (
-                      <tr key={`${row.ts}-${index}`}>
-                        <td>{row.ts}</td>
-                        <td>{row.latency_ms}</td>
-                        <td>{historyRows.load[index]?.load1 ?? 0}</td>
-                        <td>{historyRows.connections[index]?.established_connections ?? 0}</td>
-                      </tr>
-                    ))}
-                    {!historyRows.latency.length ? (
-                      <tr>
-                        <td colSpan={4}>
-                          <div className="empty-banner">No history samples.</div>
-                        </td>
-                      </tr>
-                    ) : null}
-                  </tbody>
-                </table>
+              <div className="chart-grid">
+                <LineChart
+                  title="Latency (ms)"
+                  points={chartData.latency}
+                  color="#49d49f"
+                  formatter={(value) => `${value.toFixed(1)} ms`}
+                  emptyText="No latency samples"
+                />
+                <LineChart
+                  title="Load1"
+                  points={chartData.load}
+                  color="#f2a44b"
+                  formatter={(value) => value.toFixed(2)}
+                  emptyText="No load samples"
+                />
+                <LineChart
+                  title="Established Connections"
+                  points={chartData.connections}
+                  color="#68a9ff"
+                  formatter={(value) => `${Math.round(value)}`}
+                  emptyText="No connection samples"
+                />
               </div>
             </section>
 
@@ -476,31 +489,13 @@ export function ServerDetailPage() {
               <div className="subpanel-head">
                 <h3>New Configs per Day (14d)</h3>
               </div>
-              <div className="table-shell">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Day</th>
-                      <th>Created</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {historyRows.daily.map((row) => (
-                      <tr key={row.day}>
-                        <td>{row.day}</td>
-                        <td>{row.count}</td>
-                      </tr>
-                    ))}
-                    {!historyRows.daily.length ? (
-                      <tr>
-                        <td colSpan={2}>
-                          <div className="empty-banner">No daily stats.</div>
-                        </td>
-                      </tr>
-                    ) : null}
-                  </tbody>
-                </table>
-              </div>
+              <BarChart
+                title="Created Configs"
+                points={chartData.daily}
+                color="#4aa3ff"
+                formatter={(value) => `${Math.round(value)}`}
+                emptyText="No daily stats"
+              />
             </section>
           </div>
         </>
