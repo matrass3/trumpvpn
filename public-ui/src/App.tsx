@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+п»їimport { useEffect, useMemo, useState } from "react";
 import "./styles.css";
 
 type PublicConfig = {
@@ -102,7 +102,7 @@ function LandingPage() {
             <span>{config.brand}</span>
           </div>
           <a className="btn btn-primary" href={config.bot_url} target="_blank" rel="noreferrer noopener">
-            Открыть Telegram-бота
+            Open Telegram Bot
           </a>
         </header>
 
@@ -110,38 +110,38 @@ function LandingPage() {
           <div>
             <p className="eyebrow">Premium privacy network</p>
             <h1>
-              Быстрый VPN-сервис
+              Fast VPN service
               <br />
-              для повседневной работы
+              for daily work
             </h1>
             <p className="lead">
-              Подключение и управление подпиской в Telegram. Стабильные протоколы,
-              адаптивная маршрутизация и предсказуемое качество соединения каждый день.
+              Connect and manage your subscription in Telegram. Stable protocols,
+              adaptive routing, and predictable connection quality every day.
             </p>
             <div className="hero-actions">
               <a className="btn btn-primary" href={config.bot_url} target="_blank" rel="noreferrer noopener">
-                Начать за 1 минуту
+                Start in 1 minute
               </a>
               <a className="btn btn-secondary" href="#how-it-works">
-                Как это работает
+                How it works
               </a>
             </div>
           </div>
 
           <aside className="hero-card reveal" style={{ animationDelay: "120ms" }}>
-            <p className="hero-card-title">Операционная надежность</p>
+            <p className="hero-card-title">Operational reliability</p>
             <div className="hero-stats">
               <div>
                 <strong>24/7</strong>
-                <span>мониторинг узлов</span>
+                <span>node monitoring</span>
               </div>
               <div>
-                <strong>2 протокола</strong>
+                <strong>2 protocols</strong>
                 <span>VLESS Reality / Hysteria2</span>
               </div>
               <div>
-                <strong>1 бот</strong>
-                <span>управление подпиской и устройствами</span>
+                <strong>1 bot</strong>
+                <span>subscription and device management</span>
               </div>
             </div>
           </aside>
@@ -150,79 +150,79 @@ function LandingPage() {
 
       <section className="container stats reveal" style={{ animationDelay: "80ms" }}>
         <article className="stat-card">
-          <p>Подключение</p>
-          <h3>до 1 минуты</h3>
-          <span>без ручной конфигурации</span>
+          <p>Connection</p>
+          <h3>up to 1 minute</h3>
+          <span>no manual setup</span>
         </article>
         <article className="stat-card">
-          <p>Платформы</p>
-          <h3>iOS · Android · macOS · Windows</h3>
-          <span>единая подписка для всех устройств</span>
+          <p>Platforms</p>
+          <h3>iOS - Android - macOS - Windows</h3>
+          <span>one subscription for all devices</span>
         </article>
         <article className="stat-card">
-          <p>Поддержка</p>
-          <h3>через Telegram</h3>
-          <span>весь контроль в одном интерфейсе</span>
+          <p>Support</p>
+          <h3>via Telegram</h3>
+          <span>full control in one interface</span>
         </article>
       </section>
 
       <section className="container features reveal">
         <div className="section-head">
-          <p className="eyebrow">Почему TrumpVPN</p>
-          <h2>Сервисная архитектура без лишней сложности</h2>
+          <p className="eyebrow">Why TrumpVPN</p>
+          <h2>Service architecture without extra complexity</h2>
         </div>
         <div className="feature-grid">
           <article className="feature-card">
-            <h3>Моментальный старт</h3>
-            <p>Бот формирует ссылку подписки и готовые конфиги. Вы подключаетесь сразу, без длинной настройки.</p>
+            <h3>Instant onboarding</h3>
+            <p>The bot provides a subscription URL and ready configs, so you can connect right away.</p>
           </article>
           <article className="feature-card">
-            <h3>Гибкая сеть</h3>
-            <p>Два протокола под разные сценарии: стабильная повседневная работа и усиленный режим для сложных сетей.</p>
+            <h3>Flexible network</h3>
+            <p>Two protocols for different scenarios: everyday stability and a stronger mode for difficult networks.</p>
           </article>
           <article className="feature-card">
-            <h3>Контроль устройств</h3>
-            <p>Управляйте устройствами и конфигами из одного аккаунта: добавление, отзыв и обновление в пару кликов.</p>
+            <h3>Device control</h3>
+            <p>Manage devices and configs from one account: add, revoke, and refresh in a few clicks.</p>
           </article>
           <article className="feature-card">
-            <h3>Прозрачная подписка</h3>
-            <p>Баланс, продление, статусы и история операций доступны в одном месте без скрытых шагов.</p>
+            <h3>Transparent billing</h3>
+            <p>Balance, renewals, statuses, and payment history are available in one place.</p>
           </article>
         </div>
       </section>
 
       <section id="how-it-works" className="container steps reveal">
         <div className="section-head">
-          <p className="eyebrow">Как это работает</p>
-          <h2>Три шага до защищенного подключения</h2>
+          <p className="eyebrow">How it works</p>
+          <h2>Three steps to secure connection</h2>
         </div>
         <div className="step-grid">
           <article className="step-card">
             <span>01</span>
-            <h3>Откройте бота</h3>
-            <p>Запустите Telegram-бота и создайте профиль в один клик.</p>
+            <h3>Open the bot</h3>
+            <p>Launch the Telegram bot and create your profile in one click.</p>
           </article>
           <article className="step-card">
             <span>02</span>
-            <h3>Получите конфиг</h3>
-            <p>Выберите устройство и импортируйте подписку в клиент автоматически.</p>
+            <h3>Get config</h3>
+            <p>Choose your device and import the subscription into your VPN client automatically.</p>
           </article>
           <article className="step-card">
             <span>03</span>
-            <h3>Работайте без ограничений</h3>
-            <p>При необходимости переключайте протокол или обновляйте устройство в том же боте.</p>
+            <h3>Work without limits</h3>
+            <p>Switch protocol or update device in the same bot whenever needed.</p>
           </article>
         </div>
       </section>
 
       <section className="container cta reveal">
         <div>
-          <p className="eyebrow">Готово к подключению</p>
-          <h2>Подключите VPN-сервис сейчас</h2>
-          <p className="lead">Переходите в Telegram-бота, активируйте подписку и подключитесь за одну сессию.</p>
+          <p className="eyebrow">Ready to connect</p>
+          <h2>Activate your VPN now</h2>
+          <p className="lead">Open the Telegram bot, activate your plan, and connect in one short session.</p>
         </div>
         <a className="btn btn-primary" href={config.bot_url} target="_blank" rel="noreferrer noopener">
-          Перейти в бота
+          Go to bot
         </a>
       </section>
     </main>
@@ -232,10 +232,10 @@ function LandingPage() {
 function sanitizeErrorMessage(raw: string) {
   const text = String(raw || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   if (!text) {
-    return "Не удалось загрузить данные подписки";
+    return "Failed to load subscription data";
   }
   if (/502|504|bad gateway|gateway time-out|gateway timeout/i.test(text)) {
-    return "Сервис временно недоступен. Попробуйте обновить страницу через 20-30 секунд.";
+    return "Service is temporarily unavailable. Please refresh the page in 20-30 seconds.";
   }
   return text.slice(0, 280);
 }
@@ -244,6 +244,7 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
   const [data, setData] = useState<SubscriptionPreview | null>(null);
   const [pending, setPending] = useState(true);
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
 
   const search = useMemo(() => window.location.search || "", []);
 
@@ -274,60 +275,113 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
   async function copyUrl(url: string) {
     try {
       await navigator.clipboard.writeText(url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
     } catch {
       // Ignore clipboard errors in unsupported environments.
     }
   }
 
   return (
-    <main className="site">
-      <section className="card sub-head">
-        <div>
-          <h1>Subscription</h1>
-          <p className="lead">Откройте URL подписки в VPN-клиенте. В браузере доступен только предпросмотр.</p>
+    <main className="site subscription-page">
+      <section className="card sub-hero">
+        <div className="sub-hero-head">
+          <div>
+            <p className="eyebrow">Subscription portal</p>
+            <h1>Your VPN subscription</h1>
+            <p className="lead sub-lead">Use this page to copy subscription URLs and manage client imports quickly.</p>
+          </div>
+          <span className={`status ${data?.metrics.subscription_active ? "ok" : "warn"}`}>
+            {data?.metrics.subscription_active ? "ACTIVE" : "INACTIVE"}
+          </span>
         </div>
-        <span className={`status ${data?.metrics.subscription_active ? "ok" : "warn"}`}>
-          {data?.metrics.subscription_active ? "ACTIVE" : "INACTIVE"}
-        </span>
       </section>
 
-      {pending ? <div className="card">Загрузка...</div> : null}
+      {pending ? <div className="card sub-loading">Loading subscription data...</div> : null}
       {error ? <div className="card error">{error}</div> : null}
 
       {data ? (
         <>
-          <section className="grid-5">
-            <article className="card metric"><span>Status</span><strong>{data.metrics.subscription_active ? "Active" : "Inactive"}</strong></article>
-            <article className="card metric"><span>Days left</span><strong>{data.metrics.days_left}</strong></article>
-            <article className="card metric"><span>Servers</span><strong>{data.metrics.servers_count}</strong></article>
-            <article className="card metric"><span>Devices</span><strong>{data.metrics.devices_count}</strong></article>
-            <article className="card metric"><span>Traffic used</span><strong>{data.metrics.traffic_used_text}</strong></article>
+          <section className="sub-metrics">
+            <article className="card metric">
+              <span>Status</span>
+              <strong>{data.metrics.subscription_active ? "Active" : "Inactive"}</strong>
+            </article>
+            <article className="card metric">
+              <span>Days left</span>
+              <strong>{data.metrics.days_left}</strong>
+            </article>
+            <article className="card metric">
+              <span>Servers</span>
+              <strong>{data.metrics.servers_count}</strong>
+            </article>
+            <article className="card metric">
+              <span>Devices</span>
+              <strong>{data.metrics.devices_count}</strong>
+            </article>
+            <article className="card metric">
+              <span>Traffic used</span>
+              <strong>{data.metrics.traffic_used_text}</strong>
+            </article>
+            <article className="card metric">
+              <span>Expires</span>
+              <strong>{data.metrics.expires_text}</strong>
+            </article>
           </section>
 
-          <section className="card">
-            <h2>Ссылка подписки</h2>
-            <div className="actions">
-              <button className="btn" type="button" onClick={() => void copyUrl(data.links.subscription_url)}>Скопировать URL</button>
-              <a className="btn ghost" href={data.links.stats_url}>Обновить</a>
-              <a className="btn ghost" href={data.links.raw_url}>Raw</a>
-              <a className="btn ghost" href={data.links.b64_url}>Base64</a>
-              {data.links.happ_import_url ? <a className="btn" href={data.links.happ_import_url}>Открыть в HApp</a> : null}
-              {data.links.happ_download_url ? <a className="btn ghost" href={data.links.happ_download_url} target="_blank" rel="noreferrer noopener">Скачать HApp</a> : null}
+          <section className="card sub-url-card">
+            <div className="sub-url-head">
+              <div>
+                <h2>Subscription URL</h2>
+                <p className="sub-note">Open this URL in your VPN app. Browser mode is for preview only.</p>
+              </div>
+              <div className="sub-url-actions">
+                <button className="btn btn-primary" type="button" onClick={() => void copyUrl(data.links.subscription_url)}>
+                  {copied ? "Copied" : "Copy URL"}
+                </button>
+                <a className="btn btn-secondary" href={data.links.stats_url}>Refresh</a>
+                <a className="btn btn-secondary" href={data.links.raw_url}>Raw</a>
+                <a className="btn btn-secondary" href={data.links.b64_url}>Base64</a>
+                {data.links.happ_import_url ? <a className="btn btn-secondary" href={data.links.happ_import_url}>Open in HApp</a> : null}
+                {data.links.happ_download_url ? <a className="btn btn-secondary" href={data.links.happ_download_url} target="_blank" rel="noreferrer noopener">Download HApp</a> : null}
+              </div>
             </div>
             <pre className="url-box">{data.links.subscription_url}</pre>
           </section>
 
-          <section className="card">
-            <h2>Аккаунт</h2>
-            <p>
-              Telegram ID: {data.account.telegram_id} · Username: {data.account.username || "-"} · Balance: {data.account.balance_rub} RUB · Expires: {data.metrics.expires_text}
-            </p>
-            <div className="chips">
-              {data.devices.length ? data.devices.map((x) => <span key={x} className="chip">{x}</span>) : <span className="muted">Нет устройств</span>}
-            </div>
-            <div className="chips">
-              {data.servers.length ? data.servers.map((x) => <span key={x} className="chip">{x}</span>) : <span className="muted">Нет серверов</span>}
-            </div>
+          <section className="sub-bottom-grid">
+            <article className="card sub-account-card">
+              <h2>Account</h2>
+              <dl className="sub-account-list">
+                <div>
+                  <dt>Telegram ID</dt>
+                  <dd>{data.account.telegram_id}</dd>
+                </div>
+                <div>
+                  <dt>Username</dt>
+                  <dd>{data.account.username || "-"}</dd>
+                </div>
+                <div>
+                  <dt>Balance</dt>
+                  <dd>{data.account.balance_rub} RUB</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article className="card sub-resources-card">
+              <div>
+                <h3>Devices</h3>
+                <div className="chips">
+                  {data.devices.length ? data.devices.map((x) => <span key={x} className="chip">{x}</span>) : <span className="muted">No devices</span>}
+                </div>
+              </div>
+              <div className="sub-servers-block">
+                <h3>Servers</h3>
+                <div className="chips">
+                  {data.servers.length ? data.servers.map((x) => <span key={x} className="chip">{x}</span>) : <span className="muted">No servers</span>}
+                </div>
+              </div>
+            </article>
           </section>
         </>
       ) : null}
