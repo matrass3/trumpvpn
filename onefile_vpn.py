@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import asyncio
 import base64
 import hashlib
@@ -35,7 +35,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardRemove,
 )
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     welcome_channel_url: str = "https://t.me/trumpxvpn"
     welcome_channel_chat: str = "@trumpxvpn"
     public_bot_url: str = "https://t.me/trumpvlessbot"
+    public_user_session_hours: int = 720
     payments_notify_chat_id: int = -1003861242059
     happ_import_url_template: str = "happ://add?url={url}"
     happ_download_url: str = "https://happ.su"
@@ -111,31 +112,31 @@ MAX_ACTIVE_CONFIGS_PER_USER = 3
 SUBSCRIPTION_PLANS = [
     {
         "id": "m1",
-        "label": "1 месяц",
+        "label": "1 РјРµСЃСЏС†",
         "months": 1,
         "price_rub": 199,
-        "badge": "Старт",
+        "badge": "РЎС‚Р°СЂС‚",
     },
     {
         "id": "m3",
-        "label": "3 месяца",
+        "label": "3 РјРµСЃСЏС†Р°",
         "months": 3,
         "price_rub": 499,
-        "badge": "Выгодно",
+        "badge": "Р’С‹РіРѕРґРЅРѕ",
     },
     {
         "id": "m6",
-        "label": "6 месяцев",
+        "label": "6 РјРµСЃСЏС†РµРІ",
         "months": 6,
         "price_rub": 899,
-        "badge": "Лучший выбор",
+        "badge": "Р›СѓС‡С€РёР№ РІС‹Р±РѕСЂ",
     },
     {
         "id": "y1",
-        "label": "1 год",
+        "label": "1 РіРѕРґ",
         "months": 12,
         "price_rub": 1490,
-        "badge": "Максимум выгоды",
+        "badge": "РњР°РєСЃРёРјСѓРј РІС‹РіРѕРґС‹",
     },
 ]
 
@@ -604,6 +605,16 @@ class ApplyPromoRequest(BaseModel):
     code: str = Field(min_length=2, max_length=64)
 
 
+class TelegramAuthRequest(BaseModel):
+    id: int
+    first_name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
+    photo_url: str | None = None
+    auth_date: int
+    hash: str
+
+
 def require_internal_token(x_internal_token: str = Header(default="")) -> None:
     if x_internal_token != settings.internal_api_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal token")
@@ -657,6 +668,133 @@ def require_admin_session(request: Request) -> int | None:
     if not payload:
         return None
     return int(payload["admin_id"])
+
+
+PUBLIC_USER_COOKIE = "vpn_user_session"
+
+
+def make_public_user_session_token(telegram_id: int) -> str:
+    payload = {
+        "telegram_id": int(telegram_id),
+        "exp": int(time.time()) + max(1, int(settings.public_user_session_hours or 720)) * 3600,
+    }
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+    body = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("utf-8").rstrip("=")
+    signature = _sign_session(body)
+    return f"{body}.{signature}"
+
+
+def parse_public_user_session_token(token: str | None) -> dict[str, Any] | None:
+    if not token or "." not in token:
+        return None
+    body, signature = token.rsplit(".", 1)
+    if not hmac.compare_digest(_sign_session(body), signature):
+        return None
+    padded = body + "=" * (-len(body) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    exp = int(payload.get("exp", 0))
+    telegram_id = int(payload.get("telegram_id", 0))
+    if exp < int(time.time()) or telegram_id <= 0:
+        return None
+    return payload
+
+
+def _request_is_https(request: Request | None) -> bool:
+    if not request:
+        return False
+    proto = str(request.headers.get("x-forwarded-proto", "")).strip().lower()
+    if proto:
+        return proto == "https"
+    return str(getattr(request.url, "scheme", "")).lower() == "https"
+
+
+def _set_public_user_cookie(response: Any, telegram_id: int, request: Request | None = None) -> None:
+    response.set_cookie(
+        key=PUBLIC_USER_COOKIE,
+        value=make_public_user_session_token(int(telegram_id)),
+        max_age=max(1, int(settings.public_user_session_hours or 720)) * 3600,
+        httponly=True,
+        secure=_request_is_https(request),
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_public_user_cookie(response: Any) -> None:
+    response.delete_cookie(key=PUBLIC_USER_COOKIE, path="/")
+
+
+def _verify_telegram_auth_payload(payload: TelegramAuthRequest) -> tuple[int, str | None]:
+    bot_token = str(settings.bot_token or "").strip()
+    if not bot_token:
+        raise HTTPException(status_code=503, detail="Telegram auth is not configured")
+
+    auth_date = int(payload.auth_date or 0)
+    now_ts = int(time.time())
+    if auth_date <= 0 or auth_date < now_ts - 86400 or auth_date > now_ts + 600:
+        raise HTTPException(status_code=401, detail="Telegram auth expired")
+
+    data = payload.model_dump(exclude_none=True)
+    provided_hash = str(data.pop("hash", "") or "").strip().lower()
+    if not provided_hash:
+        raise HTTPException(status_code=401, detail="Invalid Telegram auth payload")
+
+    check_parts = [f"{key}={data[key]}" for key in sorted(data.keys())]
+    data_check_string = "\n".join(check_parts)
+    secret_key = hashlib.sha256(bot_token.encode("utf-8")).digest()
+    expected_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_hash, provided_hash):
+        raise HTTPException(status_code=401, detail="Telegram auth signature mismatch")
+
+    telegram_id = int(payload.id or 0)
+    if telegram_id <= 0:
+        raise HTTPException(status_code=401, detail="Invalid Telegram user")
+    return telegram_id, str(payload.username or "").strip() or None
+
+
+def _public_user_from_request(request: Request, db: Session) -> User:
+    token = request.cookies.get(PUBLIC_USER_COOKIE)
+    payload = parse_public_user_session_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    telegram_id = int(payload.get("telegram_id") or 0)
+    user = fetch_user_with_configs(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return user
+
+
+def _public_cabinet_payload(db: Session, user: User) -> dict[str, Any]:
+    invited_count, total_bonus = user_referral_stats(db, int(user.id))
+    active = active_giveaways(telegram_id=int(user.telegram_id), db=db)
+    payments = list_payments(int(user.telegram_id), db=db)
+    return {
+        "user": serialize_user(user, invited_count=invited_count, referral_bonus_rub=total_bonus),
+        "plans": [
+            {
+                "id": str(plan.get("id") or ""),
+                "label": str(plan.get("label") or ""),
+                "months": int(plan.get("months") or 0),
+                "price_rub": int(plan.get("price_rub") or 0),
+                "badge": str(plan.get("badge") or ""),
+                "days": int(subscription_plan_days(plan)),
+            }
+            for plan in SUBSCRIPTION_PLANS
+        ],
+        "payment": {
+            "min_topup_rub": int(settings.min_topup_rub),
+            "max_topup_rub": int(settings.max_topup_rub),
+            "gateway": str(settings.payment_gateway or "cryptopay"),
+            "price_rub": int(settings.subscription_price_rub),
+        },
+        "giveaways": active,
+        "payments": payments,
+    }
 
 
 def make_user_subscription_token(telegram_id: int) -> str:
@@ -871,21 +1009,21 @@ def _is_giveaway_active(giveaway: Giveaway, now: datetime | None = None) -> bool
 
 def _giveaway_kind_title(kind: str) -> str:
     if kind == GIVEAWAY_KIND_CHANNEL_SUB:
-        return "Подписка на группу"
+        return "РџРѕРґРїРёСЃРєР° РЅР° РіСЂСѓРїРїСѓ"
     if kind == GIVEAWAY_KIND_ACTIVE_SUB_MIN_DEPOSIT:
-        return "Активная подписка + депозит"
+        return "РђРєС‚РёРІРЅР°СЏ РїРѕРґРїРёСЃРєР° + РґРµРїРѕР·РёС‚"
     if kind == GIVEAWAY_KIND_REFERRAL_LEADER:
-        return "Лидер по рефералам"
+        return "Р›РёРґРµСЂ РїРѕ СЂРµС„РµСЂР°Р»Р°Рј"
     return kind
 
 
 def _giveaway_condition_text(kind: str) -> str:
     if kind == GIVEAWAY_KIND_CHANNEL_SUB:
-        return "Подписка на группу (та же, что для бонуса +3 дня)."
+        return "РџРѕРґРїРёСЃРєР° РЅР° РіСЂСѓРїРїСѓ (С‚Р° Р¶Рµ, С‡С‚Рѕ РґР»СЏ Р±РѕРЅСѓСЃР° +3 РґРЅСЏ)."
     if kind == GIVEAWAY_KIND_ACTIVE_SUB_MIN_DEPOSIT:
-        return f"Активная подписка и депозит от {GIVEAWAY_MIN_DEPOSIT_RUB} RUB."
+        return f"РђРєС‚РёРІРЅР°СЏ РїРѕРґРїРёСЃРєР° Рё РґРµРїРѕР·РёС‚ РѕС‚ {GIVEAWAY_MIN_DEPOSIT_RUB} RUB."
     if kind == GIVEAWAY_KIND_REFERRAL_LEADER:
-        return "Больше всего рефералов за время розыгрыша."
+        return "Р‘РѕР»СЊС€Рµ РІСЃРµРіРѕ СЂРµС„РµСЂР°Р»РѕРІ Р·Р° РІСЂРµРјСЏ СЂРѕР·С‹РіСЂС‹С€Р°."
     return str(kind or "")
 
 
@@ -1023,19 +1161,19 @@ def _notify_giveaway_winners(
     if admin_ids:
         if winners:
             lines = [
-                "🏁 Розыгрыш завершен",
+                "рџЏЃ Р РѕР·С‹РіСЂС‹С€ Р·Р°РІРµСЂС€РµРЅ",
                 f"{title}",
-                f"Условие: {_giveaway_condition_text(str(giveaway.kind or ''))}",
-                "Победители:",
+                f"РЈСЃР»РѕРІРёРµ: {_giveaway_condition_text(str(giveaway.kind or ''))}",
+                "РџРѕР±РµРґРёС‚РµР»Рё:",
             ]
             for w in winners:
                 username = f"@{w['username']}" if w.get("username") and w["username"] != "-" else "-"
                 lines.append(f"- {w['telegram_id']} {username}")
         else:
             lines = [
-                "🏁 Розыгрыш завершен",
+                "рџЏЃ Р РѕР·С‹РіСЂС‹С€ Р·Р°РІРµСЂС€РµРЅ",
                 f"{title}",
-                "Победители не найдены (нет участников).",
+                "РџРѕР±РµРґРёС‚РµР»Рё РЅРµ РЅР°Р№РґРµРЅС‹ (РЅРµС‚ СѓС‡Р°СЃС‚РЅРёРєРѕРІ).",
             ]
         for admin_id in admin_ids:
             _send_telegram_message(admin_id, "\n".join(lines))
@@ -1043,10 +1181,10 @@ def _notify_giveaway_winners(
     for w in winners:
         winner_text = "\n".join(
             [
-                "🎉 Поздравляем, вы победили в розыгрыше!",
+                "рџЋ‰ РџРѕР·РґСЂР°РІР»СЏРµРј, РІС‹ РїРѕР±РµРґРёР»Рё РІ СЂРѕР·С‹РіСЂС‹С€Рµ!",
                 f"{title}",
-                f"Условие: {_giveaway_condition_text(str(giveaway.kind or ''))}",
-                f"Свяжитесь с поддержкой: {support_contact}",
+                f"РЈСЃР»РѕРІРёРµ: {_giveaway_condition_text(str(giveaway.kind or ''))}",
+                f"РЎРІСЏР¶РёС‚РµСЃСЊ СЃ РїРѕРґРґРµСЂР¶РєРѕР№: {support_contact}",
             ]
         )
         _send_telegram_message(int(w["telegram_id"]), winner_text)
@@ -1567,7 +1705,7 @@ def _render_subscription_preview_page(
       <div class="head">
         <div>
           <h1>TrumpVPN Subscription</h1>
-          <div class="sub">Откройте этот URL в VPN-клиенте как ссылку подписки. В браузере это только удобный предпросмотр.</div>
+          <div class="sub">РћС‚РєСЂРѕР№С‚Рµ СЌС‚РѕС‚ URL РІ VPN-РєР»РёРµРЅС‚Рµ РєР°Рє СЃСЃС‹Р»РєСѓ РїРѕРґРїРёСЃРєРё. Р’ Р±СЂР°СѓР·РµСЂРµ СЌС‚Рѕ С‚РѕР»СЊРєРѕ СѓРґРѕР±РЅС‹Р№ РїСЂРµРґРїСЂРѕСЃРјРѕС‚СЂ.</div>
         </div>
         <div class="status {'off' if not is_subscription_active(user) else ''}">{'Inactive' if not is_subscription_active(user) else 'Active'}</div>
       </div>
@@ -1575,28 +1713,28 @@ def _render_subscription_preview_page(
       <div class="grid">{cards_html}</div>
 
       <div class="section">
-        <h2>Ссылка подписки</h2>
+        <h2>РЎСЃС‹Р»РєР° РїРѕРґРїРёСЃРєРё</h2>
         <div class="row">
-          <button class="btn" type="button" onclick="copyText('sub-url')">Скопировать URL</button>
-          <a class="btn ghost" href="{escape(stats_url)}">Обновить</a>
+          <button class="btn" type="button" onclick="copyText('sub-url')">РЎРєРѕРїРёСЂРѕРІР°С‚СЊ URL</button>
+          <a class="btn ghost" href="{escape(stats_url)}">РћР±РЅРѕРІРёС‚СЊ</a>
           <a class="btn ghost" href="{escape(raw_url)}">Raw</a>
           <a class="btn ghost" href="{escape(b64_url)}">Base64</a>
-          {f'<a class="btn ok" href="{escape(happ_import_url)}">Открыть в HApp</a>' if happ_import_url else ''}
-          {f'<a class="btn ghost" href="{escape(str(settings.happ_download_url or ""))}" target="_blank" rel="noopener">Скачать HApp</a>' if str(settings.happ_download_url or "").strip() else ''}
+          {f'<a class="btn ok" href="{escape(happ_import_url)}">РћС‚РєСЂС‹С‚СЊ РІ HApp</a>' if happ_import_url else ''}
+          {f'<a class="btn ghost" href="{escape(str(settings.happ_download_url or ""))}" target="_blank" rel="noopener">РЎРєР°С‡Р°С‚СЊ HApp</a>' if str(settings.happ_download_url or "").strip() else ''}
         </div>
         <div id="sub-url" class="url-box">{escape(subscription_url)}</div>
-        <div class="note">Для HApp лучше использовать кнопку <code>Открыть в HApp</code> — ссылка отправляется в совместимом формате без <code>preview</code>.</div>
+        <div class="note">Р”Р»СЏ HApp Р»СѓС‡С€Рµ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ РєРЅРѕРїРєСѓ <code>РћС‚РєСЂС‹С‚СЊ РІ HApp</code> вЂ” СЃСЃС‹Р»РєР° РѕС‚РїСЂР°РІР»СЏРµС‚СЃСЏ РІ СЃРѕРІРјРµСЃС‚РёРјРѕРј С„РѕСЂРјР°С‚Рµ Р±РµР· <code>preview</code>.</div>
       </div>
 
       <div class="section">
-        <h2>Аккаунт</h2>
-        <div class="muted">Telegram ID: {int(user.telegram_id)} · Username: {escape(username_text)} · Balance: {int(user.balance_rub or 0)} RUB</div>
+        <h2>РђРєРєР°СѓРЅС‚</h2>
+        <div class="muted">Telegram ID: {int(user.telegram_id)} В· Username: {escape(username_text)} В· Balance: {int(user.balance_rub or 0)} RUB</div>
         <div style="margin-top:10px;">
-          <div class="muted">Устройства</div>
+          <div class="muted">РЈСЃС‚СЂРѕР№СЃС‚РІР°</div>
           <div class="pill-wrap">{devices_html}</div>
         </div>
         <div style="margin-top:10px;">
-          <div class="muted">Серверы в текущей подписке</div>
+          <div class="muted">РЎРµСЂРІРµСЂС‹ РІ С‚РµРєСѓС‰РµР№ РїРѕРґРїРёСЃРєРµ</div>
           <div class="pill-wrap">{servers_html}</div>
         </div>
       </div>
@@ -2626,19 +2764,19 @@ def notify_payment_paid(user: User, payment: PaymentInvoice, source: str) -> Non
         return
     username = f"@{user.username}" if user.username else "-"
     lines = [
-        "✅ Оплата подтверждена",
-        f"Источник: {source}",
+        "вњ… РћРїР»Р°С‚Р° РїРѕРґС‚РІРµСЂР¶РґРµРЅР°",
+        f"РСЃС‚РѕС‡РЅРёРє: {source}",
         f"Telegram ID: {user.telegram_id}",
         f"Username: {username}",
         f"Invoice: {payment.invoice_id}",
-        f"Сумма (face): {int(payment.amount_rub or 0)} RUB",
-        f"Сумма (payable): {int(payment.payable_rub or 0)} RUB",
-        f"Промо: {payment.promo_code_text or '-'} ({int(payment.promo_discount_percent or 0)}%)",
-        f"Зачислено: {int(payment.credited_rub or 0)} RUB",
-        f"Реф. бонус: {int(payment.referral_bonus_rub or 0)} RUB",
-        f"Баланс пользователя: {int(user.balance_rub or 0)} RUB",
-        f"Подписка до: {_fmt_notify_dt(user.subscription_until)}",
-        f"Оплачено: {_fmt_notify_dt(payment.paid_at)}",
+        f"РЎСѓРјРјР° (face): {int(payment.amount_rub or 0)} RUB",
+        f"РЎСѓРјРјР° (payable): {int(payment.payable_rub or 0)} RUB",
+        f"РџСЂРѕРјРѕ: {payment.promo_code_text or '-'} ({int(payment.promo_discount_percent or 0)}%)",
+        f"Р—Р°С‡РёСЃР»РµРЅРѕ: {int(payment.credited_rub or 0)} RUB",
+        f"Р РµС„. Р±РѕРЅСѓСЃ: {int(payment.referral_bonus_rub or 0)} RUB",
+        f"Р‘Р°Р»Р°РЅСЃ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ: {int(user.balance_rub or 0)} RUB",
+        f"РџРѕРґРїРёСЃРєР° РґРѕ: {_fmt_notify_dt(user.subscription_until)}",
+        f"РћРїР»Р°С‡РµРЅРѕ: {_fmt_notify_dt(payment.paid_at)}",
     ]
     _send_telegram_message(chat_id, "\n".join(lines))
 
@@ -2911,12 +3049,115 @@ def public_subscription_page(telegram_id: int, token: str):
     return _public_ui_index_response()
 
 
+@app.get("/cabinet")
+def public_cabinet_page():
+    return _public_ui_index_response()
+
+
+@app.get("/cabinet/")
+def public_cabinet_page_slash():
+    return _public_ui_index_response()
+
+
 @app.get("/api/public/config")
 def public_config_api():
+    bot_url = str(settings.public_bot_url or "https://t.me/trumpvlessbot").strip() or "https://t.me/trumpvlessbot"
+    bot_username = str(bot_url.rsplit("/", 1)[-1] or "").strip().lstrip("@")
+    if not bot_username:
+        bot_username = "trumpvlessbot"
     return {
         "brand": "TrumpVPN",
-        "bot_url": str(settings.public_bot_url or "https://t.me/trumpvlessbot").strip() or "https://t.me/trumpvlessbot",
+        "bot_url": bot_url,
+        "bot_username": bot_username,
     }
+
+
+@app.post("/api/public/auth/telegram")
+def public_auth_telegram(payload: TelegramAuthRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    telegram_id, username = _verify_telegram_auth_payload(payload)
+    user = get_or_create_user(db, telegram_id=telegram_id, username=username)
+    _set_public_user_cookie(response, telegram_id=telegram_id, request=request)
+    return {
+        "ok": True,
+        "user": {
+            "telegram_id": int(user.telegram_id),
+            "username": str(user.username or ""),
+        },
+    }
+
+
+@app.post("/api/public/auth/logout")
+def public_auth_logout(response: Response):
+    _clear_public_user_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/api/public/cabinet")
+def public_cabinet(request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    return _public_cabinet_payload(db, user)
+
+
+@app.post("/api/public/cabinet/payments/create")
+def public_cabinet_create_payment(payload: dict[str, Any], request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    amount_rub = int(payload.get("amount_rub") or 0)
+    gateway = str(payload.get("gateway") or "").strip() or None
+    req = CreatePaymentRequest(telegram_id=int(user.telegram_id), amount_rub=amount_rub, gateway=gateway)
+    return create_payment(req, db)
+
+
+@app.post("/api/public/cabinet/payments/check")
+def public_cabinet_check_payment(payload: dict[str, Any], request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    invoice_id = int(payload.get("invoice_id") or 0)
+    req = CheckPaymentRequest(telegram_id=int(user.telegram_id), invoice_id=invoice_id)
+    return check_payment(req, db)
+
+
+@app.get("/api/public/cabinet/payments")
+def public_cabinet_payments(request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    return list_payments(int(user.telegram_id), db)
+
+
+@app.post("/api/public/cabinet/renew-from-balance")
+def public_cabinet_renew_from_balance(request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    return renew_from_balance(RenewFromBalanceRequest(telegram_id=int(user.telegram_id)), db)
+
+
+@app.post("/api/public/cabinet/purchase-plan")
+def public_cabinet_purchase_plan(payload: dict[str, Any], request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    plan_id = str(payload.get("plan_id") or "").strip()
+    return purchase_subscription_plan(PurchaseSubscriptionPlanRequest(telegram_id=int(user.telegram_id), plan_id=plan_id), db)
+
+
+@app.post("/api/public/cabinet/promo/apply")
+def public_cabinet_apply_promo(payload: dict[str, Any], request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    code = str(payload.get("code") or "").strip()
+    return apply_promo(ApplyPromoRequest(telegram_id=int(user.telegram_id), code=code), db)
+
+
+@app.post("/api/public/cabinet/welcome/claim")
+def public_cabinet_claim_welcome(request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    return claim_welcome_bonus(ClaimWelcomeBonusRequest(telegram_id=int(user.telegram_id)), db)
+
+
+@app.get("/api/public/cabinet/giveaways")
+def public_cabinet_giveaways(request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    return active_giveaways(telegram_id=int(user.telegram_id), db=db)
+
+
+@app.post("/api/public/cabinet/giveaways/join")
+def public_cabinet_join_giveaway(payload: dict[str, Any], request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    giveaway_id = int(payload.get("giveaway_id") or 0)
+    return join_giveaway({"telegram_id": int(user.telegram_id), "giveaway_id": giveaway_id}, db)
 
 
 @app.get("/api/public/subscription/{telegram_id}/{token}")
@@ -3804,14 +4045,14 @@ def _subscription_reminder_text(days_left: int, subscription_until: datetime | N
     tail = _fmt_user_subscription_dt(subscription_until)
     if days_left <= 1:
         return (
-            "⏳ Ваша подписка заканчивается через 1 день.\n"
-            f"До: {tail}\n\n"
-            "Продлить можно в боте: /menu → Подписка"
+            "вЏі Р’Р°С€Р° РїРѕРґРїРёСЃРєР° Р·Р°РєР°РЅС‡РёРІР°РµС‚СЃСЏ С‡РµСЂРµР· 1 РґРµРЅСЊ.\n"
+            f"Р”Рѕ: {tail}\n\n"
+            "РџСЂРѕРґР»РёС‚СЊ РјРѕР¶РЅРѕ РІ Р±РѕС‚Рµ: /menu в†’ РџРѕРґРїРёСЃРєР°"
         )
     return (
-        "⏳ До окончания подписки осталось 3 дня.\n"
-        f"До: {tail}\n\n"
-        "Продлить можно в боте: /menu → Подписка"
+        "вЏі Р”Рѕ РѕРєРѕРЅС‡Р°РЅРёСЏ РїРѕРґРїРёСЃРєРё РѕСЃС‚Р°Р»РѕСЃСЊ 3 РґРЅСЏ.\n"
+        f"Р”Рѕ: {tail}\n\n"
+        "РџСЂРѕРґР»РёС‚СЊ РјРѕР¶РЅРѕ РІ Р±РѕС‚Рµ: /menu в†’ РџРѕРґРїРёСЃРєР°"
     )
 
 
@@ -3916,10 +4157,10 @@ def _runtime_severity(runtime: dict[str, Any] | None) -> str:
 
 def _severity_emoji(severity: str) -> str:
     if severity == "green":
-        return "🟢"
+        return "рџџў"
     if severity == "yellow":
-        return "🟡"
-    return "🔴"
+        return "рџџЎ"
+    return "рџ”ґ"
 
 
 def _severity_color(severity: str) -> str:
@@ -4162,7 +4403,7 @@ def _admin_pagination_bar(base_path: str, pagination: dict[str, Any], params: di
         f"{link_html(page - 1, 'Prev', disabled=page <= 1)}"
         + "".join(numbered)
         + f"{link_html(page + 1, 'Next', disabled=page >= total_pages)}"
-        + f"<span class='muted' style='align-self:center;margin-left:6px;'>Page {page}/{total_pages} · total {int(pagination['total'])}</span>"
+        + f"<span class='muted' style='align-self:center;margin-left:6px;'>Page {page}/{total_pages} В· total {int(pagination['total'])}</span>"
         "</div>"
     )
 
@@ -5990,7 +6231,7 @@ def _render_admin_server_detail_page(snapshot: dict[str, Any], msg_text: str = "
             "</tr>"
         )
 
-    toggle_text = "Скрыть из выдачи" if bool(server["enabled"]) else "Вернуть в выдачу"
+    toggle_text = "РЎРєСЂС‹С‚СЊ РёР· РІС‹РґР°С‡Рё" if bool(server["enabled"]) else "Р’РµСЂРЅСѓС‚СЊ РІ РІС‹РґР°С‡Сѓ"
     live_error_html = ""
     if snapshot.get("live_active_devices_error"):
         live_error_html = f"<div class='notice err'>{escape(str(snapshot.get('live_active_devices_error')))}</div>"
@@ -6120,20 +6361,20 @@ def _render_admin_server_detail_page(snapshot: dict[str, Any], msg_text: str = "
                 "</div>"
             ),
         )
-        + _admin_section_html("Edit Server", edit_form, desc="Все поля и поведение сохранены, изменена только компоновка.")
+        + _admin_section_html("Edit Server", edit_form, desc="Р’СЃРµ РїРѕР»СЏ Рё РїРѕРІРµРґРµРЅРёРµ СЃРѕС…СЂР°РЅРµРЅС‹, РёР·РјРµРЅРµРЅР° С‚РѕР»СЊРєРѕ РєРѕРјРїРѕРЅРѕРІРєР°.")
         + _admin_section_html(
             "Danger Zone",
             (
-                "<div class='notice err'>Операции ниже меняют состояние ноды или удаляют данные. Используйте только при необходимости.</div>"
+                "<div class='notice err'>РћРїРµСЂР°С†РёРё РЅРёР¶Рµ РјРµРЅСЏСЋС‚ СЃРѕСЃС‚РѕСЏРЅРёРµ РЅРѕРґС‹ РёР»Рё СѓРґР°Р»СЏСЋС‚ РґР°РЅРЅС‹Рµ. РСЃРїРѕР»СЊР·СѓР№С‚Рµ С‚РѕР»СЊРєРѕ РїСЂРё РЅРµРѕР±С…РѕРґРёРјРѕСЃС‚Рё.</div>"
                 "<div class='section-actions'>"
         f"<form method='post' action='/admin/action/server/{server_id}/restart' class='inline-form'><button class='btn small' type='submit'>Restart service</button></form>"
                 f"<form method='post' action='/admin/action/server/{server_id}/toggle-enabled' class='inline-form'><button class='btn small' type='submit'>{escape(toggle_text)}</button></form>"
                 f"<form method='post' action='/admin/action/server/{server_id}/delete' class='inline-form'>"
-                "<button class='btn danger small' type='submit' onclick=\"return confirm('Удалить сервер и его локальные записи?');\">Delete Server</button>"
+                "<button class='btn danger small' type='submit' onclick=\"return confirm('РЈРґР°Р»РёС‚СЊ СЃРµСЂРІРµСЂ Рё РµРіРѕ Р»РѕРєР°Р»СЊРЅС‹Рµ Р·Р°РїРёСЃРё?');\">Delete Server</button>"
                 "</form>"
                 "</div>"
             ),
-            desc="Restart/toggle/delete вынесены отдельно от обычного редактирования параметров сервера.",
+            desc="Restart/toggle/delete РІС‹РЅРµСЃРµРЅС‹ РѕС‚РґРµР»СЊРЅРѕ РѕС‚ РѕР±С‹С‡РЅРѕРіРѕ СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёСЏ РїР°СЂР°РјРµС‚СЂРѕРІ СЃРµСЂРІРµСЂР°.",
         )
         + "</div>"
         + "</div>"
@@ -6462,7 +6703,7 @@ def _render_admin_overview_page(snapshot: dict[str, Any], msg_text: str = "", er
             "<div class='leader-item'>"
             f"<div><div class='name'>{escape(str(row.get('username') or '-'))}</div>"
             f"<div class='meta'>tg {escape(str(row.get('telegram_id', 0)))}</div></div>"
-            f"<div class='val'>{int(row.get('referrals') or 0)} refs · {int(row.get('bonus_rub') or 0)} RUB</div>"
+            f"<div class='val'>{int(row.get('referrals') or 0)} refs В· {int(row.get('bonus_rub') or 0)} RUB</div>"
             "</div>"
         )
     if not top_referrers_html:
@@ -6470,7 +6711,7 @@ def _render_admin_overview_page(snapshot: dict[str, Any], msg_text: str = "", er
     body = (
         _admin_page_header_html(
             "Overview",
-            "Главная операционная сводка: пользователи, узлы, платежи и текущий статус системы.",
+            "Р“Р»Р°РІРЅР°СЏ РѕРїРµСЂР°С†РёРѕРЅРЅР°СЏ СЃРІРѕРґРєР°: РїРѕР»СЊР·РѕРІР°С‚РµР»Рё, СѓР·Р»С‹, РїР»Р°С‚РµР¶Рё Рё С‚РµРєСѓС‰РёР№ СЃС‚Р°С‚СѓСЃ СЃРёСЃС‚РµРјС‹.",
             actions_html=quick_actions,
             icon="OV",
         )
@@ -6493,7 +6734,7 @@ def _render_admin_overview_page(snapshot: dict[str, Any], msg_text: str = "", er
                 f"<div class='card'><div class='label'>Referral bonus RUB</div><div class='value'>{summary['total_ref_bonus_rub']}</div></div>"
                 "</div>"
             ),
-            desc="Финансовые и продуктовые показатели без перехода по вкладкам.",
+            desc="Р¤РёРЅР°РЅСЃРѕРІС‹Рµ Рё РїСЂРѕРґСѓРєС‚РѕРІС‹Рµ РїРѕРєР°Р·Р°С‚РµР»Рё Р±РµР· РїРµСЂРµС…РѕРґР° РїРѕ РІРєР»Р°РґРєР°Рј.",
         )
         + _admin_section_html(
             "User Analytics",
@@ -6517,7 +6758,7 @@ def _render_admin_overview_page(snapshot: dict[str, Any], msg_text: str = "", er
                 f"<div class='meta-item'><div class='k'>Active configs / active user</div><div class='v'>{avg_active_cfg_per_active_user:.2f}</div></div>"
                 "</div>"
             ),
-            desc="Рост базы, активность и статусы подписок за последние периоды.",
+            desc="Р РѕСЃС‚ Р±Р°Р·С‹, Р°РєС‚РёРІРЅРѕСЃС‚СЊ Рё СЃС‚Р°С‚СѓСЃС‹ РїРѕРґРїРёСЃРѕРє Р·Р° РїРѕСЃР»РµРґРЅРёРµ РїРµСЂРёРѕРґС‹.",
         )
         + _admin_section_html(
             "Monetization",
@@ -6537,7 +6778,7 @@ def _render_admin_overview_page(snapshot: dict[str, Any], msg_text: str = "", er
                 f"<div class='meta-item'><div class='k'>Balance outstanding</div><div class='v'>{summary['total_balance_rub']}</div></div>"
                 "</div>"
             ),
-            desc="Доходность и эффективность монетизации по пользователям и периодам.",
+            desc="Р”РѕС…РѕРґРЅРѕСЃС‚СЊ Рё СЌС„С„РµРєС‚РёРІРЅРѕСЃС‚СЊ РјРѕРЅРµС‚РёР·Р°С†РёРё РїРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏРј Рё РїРµСЂРёРѕРґР°Рј.",
         )
         + _admin_section_html(
             "Growth Trends (14d)",
@@ -6561,12 +6802,12 @@ def _render_admin_overview_page(snapshot: dict[str, Any], msg_text: str = "", er
                 "</div>"
                 "</div>"
             ),
-            desc="Динамика регистрации, конфигов и платежей по дням.",
+            desc="Р”РёРЅР°РјРёРєР° СЂРµРіРёСЃС‚СЂР°С†РёРё, РєРѕРЅС„РёРіРѕРІ Рё РїР»Р°С‚РµР¶РµР№ РїРѕ РґРЅСЏРј.",
         )
         + _admin_section_html(
             "Live Connections (24h)",
             f"<div class='load-item'>{_render_series_bars(list(series.get('connections_24h', [])), '#38bdf8')}</div>",
-            desc="Суммарные TCP подключения по всем узлам (агрегация каждые 30 минут).",
+            desc="РЎСѓРјРјР°СЂРЅС‹Рµ TCP РїРѕРґРєР»СЋС‡РµРЅРёСЏ РїРѕ РІСЃРµРј СѓР·Р»Р°Рј (Р°РіСЂРµРіР°С†РёСЏ РєР°Р¶РґС‹Рµ 30 РјРёРЅСѓС‚).",
         )
         + "<div class='layout-split'>"
         + "<div class='stack'>"
@@ -6578,7 +6819,7 @@ def _render_admin_overview_page(snapshot: dict[str, Any], msg_text: str = "", er
                 f"<tbody>{health_rows}</tbody></table>"
                 "</div>"
             ),
-            desc="Первые 10 серверов для быстрого контроля без открытия вкладки Servers.",
+            desc="РџРµСЂРІС‹Рµ 10 СЃРµСЂРІРµСЂРѕРІ РґР»СЏ Р±С‹СЃС‚СЂРѕРіРѕ РєРѕРЅС‚СЂРѕР»СЏ Р±РµР· РѕС‚РєСЂС‹С‚РёСЏ РІРєР»Р°РґРєРё Servers.",
         )
         + "</div>"
         + "<div class='stack'>"
@@ -6596,7 +6837,7 @@ def _render_admin_overview_page(snapshot: dict[str, Any], msg_text: str = "", er
                 f"<div class='meta-item'><div class='k'>Enabled/Total servers</div><div class='v'>{summary['enabled_servers']}/{summary['total_servers']}</div></div>"
                 "</div>"
             ),
-            desc="Быстрые индикаторы для дежурного просмотра.",
+            desc="Р‘С‹СЃС‚СЂС‹Рµ РёРЅРґРёРєР°С‚РѕСЂС‹ РґР»СЏ РґРµР¶СѓСЂРЅРѕРіРѕ РїСЂРѕСЃРјРѕС‚СЂР°.",
         )
         + "</div>"
         + "</div>"
@@ -6614,7 +6855,7 @@ def _render_admin_overview_page(snapshot: dict[str, Any], msg_text: str = "", er
                 "</div>"
                 "</div>"
             ),
-            desc="Лидеры по выручке и рефералам для оценки здоровья каналов.",
+            desc="Р›РёРґРµСЂС‹ РїРѕ РІС‹СЂСѓС‡РєРµ Рё СЂРµС„РµСЂР°Р»Р°Рј РґР»СЏ РѕС†РµРЅРєРё Р·РґРѕСЂРѕРІСЊСЏ РєР°РЅР°Р»РѕРІ.",
         )
     )
     return _render_admin_layout(
@@ -6711,7 +6952,7 @@ def _render_admin_servers_page(snapshot: dict[str, Any], msg_text: str = "", err
     body = (
         _admin_page_header_html(
             "Servers",
-            "Управление узлами VPN, импорт REALITY-параметров, оперативный мониторинг и переход к деталям сервера.",
+            "РЈРїСЂР°РІР»РµРЅРёРµ СѓР·Р»Р°РјРё VPN, РёРјРїРѕСЂС‚ REALITY-РїР°СЂР°РјРµС‚СЂРѕРІ, РѕРїРµСЂР°С‚РёРІРЅС‹Р№ РјРѕРЅРёС‚РѕСЂРёРЅРі Рё РїРµСЂРµС…РѕРґ Рє РґРµС‚Р°Р»СЏРј СЃРµСЂРІРµСЂР°.",
             actions_html=(
                 "<a class='btn ghost' href='/admin/api/overview' style='text-decoration:none;'>JSON snapshot</a>"
                 "<a class='btn ghost' href='/admin/overview' style='text-decoration:none;'>Back to overview</a>"
@@ -6736,7 +6977,7 @@ def _render_admin_servers_page(snapshot: dict[str, Any], msg_text: str = "", err
                 "<button type='submit' class='btn'>Add/Update server</button>"
                 "</form>"
             ),
-            desc="Вставьте блок REALITY и базовые SSH-параметры. После сохранения запускается sync активных устройств.",
+            desc="Р’СЃС‚Р°РІСЊС‚Рµ Р±Р»РѕРє REALITY Рё Р±Р°Р·РѕРІС‹Рµ SSH-РїР°СЂР°РјРµС‚СЂС‹. РџРѕСЃР»Рµ СЃРѕС…СЂР°РЅРµРЅРёСЏ Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ sync Р°РєС‚РёРІРЅС‹С… СѓСЃС‚СЂРѕР№СЃС‚РІ.",
         )
         + _admin_section_html(
             "Add Hysteria2 Server",
@@ -6763,12 +7004,12 @@ def _render_admin_servers_page(snapshot: dict[str, Any], msg_text: str = "", err
                 "<button type='submit' class='btn'>Add HY2 server</button>"
                 "</form>"
             ),
-            desc="Создаёт ноду protocol=hysteria2. Скрипты add/remove берутся как /opt/vpn/add_hysteria2_user.sh и /opt/vpn/remove_hysteria2_user.sh.",
+            desc="РЎРѕР·РґР°С‘С‚ РЅРѕРґСѓ protocol=hysteria2. РЎРєСЂРёРїС‚С‹ add/remove Р±РµСЂСѓС‚СЃСЏ РєР°Рє /opt/vpn/add_hysteria2_user.sh Рё /opt/vpn/remove_hysteria2_user.sh.",
         )
         + _admin_section_html(
             "Latency Trend (24h)",
             f"<div class='load-grid'>{load_chart_rows}</div>",
-            desc="Быстрый обзор задержки по всем серверам. Цвет полосы отражает диапазон latency.",
+            desc="Р‘С‹СЃС‚СЂС‹Р№ РѕР±Р·РѕСЂ Р·Р°РґРµСЂР¶РєРё РїРѕ РІСЃРµРј СЃРµСЂРІРµСЂР°Рј. Р¦РІРµС‚ РїРѕР»РѕСЃС‹ РѕС‚СЂР°Р¶Р°РµС‚ РґРёР°РїР°Р·РѕРЅ latency.",
         )
         + _admin_section_html(
             "Servers Runtime",
@@ -6778,7 +7019,7 @@ def _render_admin_servers_page(snapshot: dict[str, Any], msg_text: str = "", err
                 f"<tbody>{server_rows}</tbody></table>"
                 "</div>"
             ),
-            desc="Основная таблица операций по нодам. Все действия (details/restart) сохранены.",
+            desc="РћСЃРЅРѕРІРЅР°СЏ С‚Р°Р±Р»РёС†Р° РѕРїРµСЂР°С†РёР№ РїРѕ РЅРѕРґР°Рј. Р’СЃРµ РґРµР№СЃС‚РІРёСЏ (details/restart) СЃРѕС…СЂР°РЅРµРЅС‹.",
         )
         + "</div>"
         + "<div class='stack'>"
@@ -6792,7 +7033,7 @@ def _render_admin_servers_page(snapshot: dict[str, Any], msg_text: str = "", err
                 f"<div class='meta-item'><div class='k'>Active clients total</div><div class='v'>{active_clients_total}</div></div>"
                 "</div>"
             ),
-            desc="Оперативная сводка для диспетчеризации и capacity planning.",
+            desc="РћРїРµСЂР°С‚РёРІРЅР°СЏ СЃРІРѕРґРєР° РґР»СЏ РґРёСЃРїРµС‚С‡РµСЂРёР·Р°С†РёРё Рё capacity planning.",
         )
         + _admin_section_html(
             "Ops Notes",
@@ -6803,7 +7044,7 @@ def _render_admin_servers_page(snapshot: dict[str, Any], msg_text: str = "", err
                 "<div class='meta-item'><div class='k'>Failure path</div><div class='v'>Use Restart service, then Sync devices, then check errors in row</div></div>"
                 "</div>"
             ),
-            desc="Подсказки для ежедневной эксплуатации без отдельной документации.",
+            desc="РџРѕРґСЃРєР°Р·РєРё РґР»СЏ РµР¶РµРґРЅРµРІРЅРѕР№ СЌРєСЃРїР»СѓР°С‚Р°С†РёРё Р±РµР· РѕС‚РґРµР»СЊРЅРѕР№ РґРѕРєСѓРјРµРЅС‚Р°С†РёРё.",
         )
         + "</div>"
         + "</div>"
@@ -6868,7 +7109,7 @@ def _render_admin_configs_page(
     body = (
         _admin_page_header_html(
             "Configs",
-            "Последние выданные и отозванные конфиги. Удаление локальной записи и удаление на сервере доступны из таблицы.",
+            "РџРѕСЃР»РµРґРЅРёРµ РІС‹РґР°РЅРЅС‹Рµ Рё РѕС‚РѕР·РІР°РЅРЅС‹Рµ РєРѕРЅС„РёРіРё. РЈРґР°Р»РµРЅРёРµ Р»РѕРєР°Р»СЊРЅРѕР№ Р·Р°РїРёСЃРё Рё СѓРґР°Р»РµРЅРёРµ РЅР° СЃРµСЂРІРµСЂРµ РґРѕСЃС‚СѓРїРЅС‹ РёР· С‚Р°Р±Р»РёС†С‹.",
             actions_html="<a class='btn ghost' href='/admin/servers' style='text-decoration:none;'>Open servers</a>",
             icon="CF",
         )
@@ -6881,7 +7122,7 @@ def _render_admin_configs_page(
                 f"<div class='meta-item'><div class='k'>Revoked in list</div><div class='v'>{max(0, rows_count - active_count)}</div></div>"
                 "</div>"
             ),
-            desc="Быстрый контроль последней активности по устройствам.",
+            desc="Р‘С‹СЃС‚СЂС‹Р№ РєРѕРЅС‚СЂРѕР»СЊ РїРѕСЃР»РµРґРЅРµР№ Р°РєС‚РёРІРЅРѕСЃС‚Рё РїРѕ СѓСЃС‚СЂРѕР№СЃС‚РІР°Рј.",
         )
         + _admin_section_html(
             "Recent Configs",
@@ -6953,7 +7194,7 @@ def _render_admin_subscriptions_page(
     body = (
         _admin_page_header_html(
             "Subscriptions",
-            "Продление вручную, удаление подписки и контроль статуса пользователей в одном месте.",
+            "РџСЂРѕРґР»РµРЅРёРµ РІСЂСѓС‡РЅСѓСЋ, СѓРґР°Р»РµРЅРёРµ РїРѕРґРїРёСЃРєРё Рё РєРѕРЅС‚СЂРѕР»СЊ СЃС‚Р°С‚СѓСЃР° РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ РІ РѕРґРЅРѕРј РјРµСЃС‚Рµ.",
             actions_html="<a class='btn ghost' href='/admin/payments' style='text-decoration:none;'>Open payments</a>",
             icon="SB",
         )
@@ -6968,7 +7209,7 @@ def _render_admin_subscriptions_page(
                 "<button type='submit' class='btn'>Add/Extend</button>"
                 "</form>"
             ),
-            desc="Ручной оверрайд подписки для саппорта/компенсаций/тестов.",
+            desc="Р СѓС‡РЅРѕР№ РѕРІРµСЂСЂР°Р№Рґ РїРѕРґРїРёСЃРєРё РґР»СЏ СЃР°РїРїРѕСЂС‚Р°/РєРѕРјРїРµРЅСЃР°С†РёР№/С‚РµСЃС‚РѕРІ.",
         )
         + _admin_section_html(
             "Subscriptions List",
@@ -6992,7 +7233,7 @@ def _render_admin_subscriptions_page(
                 f"<div class='meta-item'><div class='k'>Expired in list</div><div class='v'>{max(0, len(subs)-active_subs)}</div></div>"
                 "</div>"
             ),
-            desc="Список отсортирован по ближайшему окончанию подписки.",
+            desc="РЎРїРёСЃРѕРє РѕС‚СЃРѕСЂС‚РёСЂРѕРІР°РЅ РїРѕ Р±Р»РёР¶Р°Р№С€РµРјСѓ РѕРєРѕРЅС‡Р°РЅРёСЋ РїРѕРґРїРёСЃРєРё.",
         )
         + "</div>"
         + "</div>"
@@ -7027,7 +7268,7 @@ def _render_admin_users_page(
         else:
             sub_status = "none"
         if user.get("is_blocked"):
-            status_text = f"blocked · {sub_status}"
+            status_text = f"blocked В· {sub_status}"
         else:
             status_text = sub_status
         tg_id = int(user.get("telegram_id") or 0)
@@ -7099,7 +7340,7 @@ def _render_admin_users_page(
     body = (
         _admin_page_header_html(
             "Users",
-            "Профили пользователей с быстрыми действиями по подписке, блокировке и конфигам.",
+            "РџСЂРѕС„РёР»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ Р±С‹СЃС‚СЂС‹РјРё РґРµР№СЃС‚РІРёСЏРјРё РїРѕ РїРѕРґРїРёСЃРєРµ, Р±Р»РѕРєРёСЂРѕРІРєРµ Рё РєРѕРЅС„РёРіР°Рј.",
             actions_html="<a class='btn ghost' href='/admin/configs' style='text-decoration:none;'>Open configs</a>",
             icon="US",
         )
@@ -7114,7 +7355,7 @@ def _render_admin_users_page(
                 f"<div class='meta-item'><div class='k'>Active configs</div><div class='v'>{int(summary.get('active_configs') or 0)}</div></div>"
                 "</div>"
             ),
-            desc="Сводные метрики по всей базе.",
+            desc="РЎРІРѕРґРЅС‹Рµ РјРµС‚СЂРёРєРё РїРѕ РІСЃРµР№ Р±Р°Р·Рµ.",
         )
         + _admin_section_html(
             "Quick Actions",
@@ -7129,7 +7370,7 @@ def _render_admin_users_page(
                 "<button type='submit' class='btn danger'>Revoke all configs</button>"
                 "</form>"
             ),
-            desc="Быстрые операции поддержки без поиска по списку.",
+            desc="Р‘С‹СЃС‚СЂС‹Рµ РѕРїРµСЂР°С†РёРё РїРѕРґРґРµСЂР¶РєРё Р±РµР· РїРѕРёСЃРєР° РїРѕ СЃРїРёСЃРєСѓ.",
         )
         + _admin_section_html(
             "Users List",
@@ -7153,7 +7394,7 @@ def _render_admin_users_page(
                 "</div>"
                 "</div>"
             ),
-            desc="Список пользователей с действиями для поддержки.",
+            desc="РЎРїРёСЃРѕРє РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ РґРµР№СЃС‚РІРёСЏРјРё РґР»СЏ РїРѕРґРґРµСЂР¶РєРё.",
         )
     )
     return _render_admin_layout(
@@ -7200,7 +7441,7 @@ def _render_admin_user_devices_page(
     body = (
         _admin_page_header_html(
             "User Devices",
-            "Управление устройствами пользователя. Удаление устройства удаляет все связанные конфиги.",
+            "РЈРїСЂР°РІР»РµРЅРёРµ СѓСЃС‚СЂРѕР№СЃС‚РІР°РјРё РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ. РЈРґР°Р»РµРЅРёРµ СѓСЃС‚СЂРѕР№СЃС‚РІР° СѓРґР°Р»СЏРµС‚ РІСЃРµ СЃРІСЏР·Р°РЅРЅС‹Рµ РєРѕРЅС„РёРіРё.",
             actions_html="<a class='btn ghost' href='/admin/users' style='text-decoration:none;'>Back to users</a>",
             icon="UD",
         )
@@ -7234,7 +7475,7 @@ def _render_admin_user_devices_page(
         )
     )
     return _render_admin_layout(
-        f"VPN Admin Devices · {tg_id}",
+        f"VPN Admin Devices В· {tg_id}",
         "users",
         snapshot["generated_at"],
         body,
@@ -7305,7 +7546,7 @@ def _render_admin_payments_page(
     body = (
         _admin_page_header_html(
             "Payments",
-            "Проверка последних инвойсов, ручное подтверждение/отклонение, контроль промо и реферальных начислений.",
+            "РџСЂРѕРІРµСЂРєР° РїРѕСЃР»РµРґРЅРёС… РёРЅРІРѕР№СЃРѕРІ, СЂСѓС‡РЅРѕРµ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ/РѕС‚РєР»РѕРЅРµРЅРёРµ, РєРѕРЅС‚СЂРѕР»СЊ РїСЂРѕРјРѕ Рё СЂРµС„РµСЂР°Р»СЊРЅС‹С… РЅР°С‡РёСЃР»РµРЅРёР№.",
             actions_html="<a class='btn ghost' href='/admin/overview' style='text-decoration:none;'>Open overview</a>",
             icon="PY",
         )
@@ -7319,7 +7560,7 @@ def _render_admin_payments_page(
                 f"<div class='meta-item'><div class='k'>Other statuses</div><div class='v'>{max(0, len(payments)-paid_rows-pending_rows)}</div></div>"
                 "</div>"
             ),
-            desc="Срез по последним 50 платежам из snapshot.",
+            desc="РЎСЂРµР· РїРѕ РїРѕСЃР»РµРґРЅРёРј 50 РїР»Р°С‚РµР¶Р°Рј РёР· snapshot.",
         )
         + _admin_section_html(
             "Recent Payments",
@@ -7486,7 +7727,7 @@ def _render_admin_settings_page(snapshot: dict[str, Any], msg_text: str = "", er
     edit_form = (
         "<form method='post' action='/admin/settings/update' class='server-form'>"
         "<div class='sub-form'>"
-        f"{_settings_input_row('Database URL', 'database_url', settings.database_url, note='Изменение требует рестарта приложения.')}"
+        f"{_settings_input_row('Database URL', 'database_url', settings.database_url, note='РР·РјРµРЅРµРЅРёРµ С‚СЂРµР±СѓРµС‚ СЂРµСЃС‚Р°СЂС‚Р° РїСЂРёР»РѕР¶РµРЅРёСЏ.')}"
         f"{_settings_input_row('API host', 'api_host', settings.api_host)}"
         f"{_settings_input_row('API port', 'api_port', settings.api_port, input_type='number')}"
         f"{_settings_input_row('API base URL', 'api_base_url', settings.api_base_url)}"
@@ -7563,7 +7804,7 @@ def _render_admin_settings_page(snapshot: dict[str, Any], msg_text: str = "", er
         + _admin_section_html("YooMoney", _settings_table_html(yoomoney_items))
         + _admin_section_html("Platega", _settings_table_html(platega_items))
         + _admin_section_html("Channels & Apps", _settings_table_html(channel_items))
-        + _admin_section_html("Edit Settings", edit_form, desc="Пустые значения для секретов оставляют их без изменений.")
+        + _admin_section_html("Edit Settings", edit_form, desc="РџСѓСЃС‚С‹Рµ Р·РЅР°С‡РµРЅРёСЏ РґР»СЏ СЃРµРєСЂРµС‚РѕРІ РѕСЃС‚Р°РІР»СЏСЋС‚ РёС… Р±РµР· РёР·РјРµРЅРµРЅРёР№.")
     )
     return _render_admin_layout(
         "Settings",
@@ -7648,7 +7889,7 @@ def _render_admin_promos_page(
     body = (
         _admin_page_header_html(
             "Promos",
-            "Создание и управление промокодами для пополнений, баланса и дней подписки. Все действия сохранены.",
+            "РЎРѕР·РґР°РЅРёРµ Рё СѓРїСЂР°РІР»РµРЅРёРµ РїСЂРѕРјРѕРєРѕРґР°РјРё РґР»СЏ РїРѕРїРѕР»РЅРµРЅРёР№, Р±Р°Р»Р°РЅСЃР° Рё РґРЅРµР№ РїРѕРґРїРёСЃРєРё. Р’СЃРµ РґРµР№СЃС‚РІРёСЏ СЃРѕС…СЂР°РЅРµРЅС‹.",
             actions_html="<a class='btn ghost' href='/admin/payments' style='text-decoration:none;'>Open payments</a>",
             icon="PR",
         )
@@ -7675,7 +7916,7 @@ def _render_admin_promos_page(
                 "<button type='submit' class='btn'>Save Promo</button>"
                 "</form>"
             ),
-            desc="Если код уже существует, запись будет обновлена.",
+            desc="Р•СЃР»Рё РєРѕРґ СѓР¶Рµ СЃСѓС‰РµСЃС‚РІСѓРµС‚, Р·Р°РїРёСЃСЊ Р±СѓРґРµС‚ РѕР±РЅРѕРІР»РµРЅР°.",
         )
         + _admin_section_html(
             "Promocodes",
@@ -7780,7 +8021,7 @@ def _render_admin_giveaways_page(
     body = (
         _admin_page_header_html(
             "Giveaways",
-            "Создание розыгрышей и управление условиями участия.",
+            "РЎРѕР·РґР°РЅРёРµ СЂРѕР·С‹РіСЂС‹С€РµР№ Рё СѓРїСЂР°РІР»РµРЅРёРµ СѓСЃР»РѕРІРёСЏРјРё СѓС‡Р°СЃС‚РёСЏ.",
             actions_html="<a class='btn ghost' href='/admin/overview' style='text-decoration:none;'>Open overview</a>",
             icon="GW",
         )
@@ -7791,22 +8032,22 @@ def _render_admin_giveaways_page(
             (
                 "<form method='post' action='/admin/action/giveaway/save' class='server-form'>"
                 "<div class='sub-form'>"
-                "<input type='text' name='title' placeholder='Название' required />"
+                "<input type='text' name='title' placeholder='РќР°Р·РІР°РЅРёРµ' required />"
                 "<select name='kind'>"
-                f"<option value='{GIVEAWAY_KIND_CHANNEL_SUB}'>Подписка на группу</option>"
-                f"<option value='{GIVEAWAY_KIND_ACTIVE_SUB_MIN_DEPOSIT}'>Активная подписка + депозит</option>"
-                f"<option value='{GIVEAWAY_KIND_REFERRAL_LEADER}'>Лидер по рефералам</option>"
+                f"<option value='{GIVEAWAY_KIND_CHANNEL_SUB}'>РџРѕРґРїРёСЃРєР° РЅР° РіСЂСѓРїРїСѓ</option>"
+                f"<option value='{GIVEAWAY_KIND_ACTIVE_SUB_MIN_DEPOSIT}'>РђРєС‚РёРІРЅР°СЏ РїРѕРґРїРёСЃРєР° + РґРµРїРѕР·РёС‚</option>"
+                f"<option value='{GIVEAWAY_KIND_REFERRAL_LEADER}'>Р›РёРґРµСЂ РїРѕ СЂРµС„РµСЂР°Р»Р°Рј</option>"
                 "</select>"
-                "<input type='text' name='prize' placeholder='Приз (например, 30 дней подписки)' />"
+                "<input type='text' name='prize' placeholder='РџСЂРёР· (РЅР°РїСЂРёРјРµСЂ, 30 РґРЅРµР№ РїРѕРґРїРёСЃРєРё)' />"
                 "<input type='text' name='starts_at' placeholder='Start UTC YYYY-MM-DDTHH:MM' />"
-                "<input type='text' name='duration' placeholder='Длительность (например, 1m, 1h, 1d)' />"
+                "<input type='text' name='duration' placeholder='Р”Р»РёС‚РµР»СЊРЅРѕСЃС‚СЊ (РЅР°РїСЂРёРјРµСЂ, 1m, 1h, 1d)' />"
                 "</div>"
-                "<textarea name='description' placeholder='Описание (опционально)' rows='3'></textarea>"
+                "<textarea name='description' placeholder='РћРїРёСЃР°РЅРёРµ (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ)' rows='3'></textarea>"
                 "<label><input type='checkbox' name='enabled' value='1' checked /> Enabled</label>"
                 "<button type='submit' class='btn'>Create Giveaway</button>"
                 "</form>"
             ),
-            desc=f"Одновременно активно не более {GIVEAWAY_MAX_ACTIVE} розыгрышей.",
+            desc=f"РћРґРЅРѕРІСЂРµРјРµРЅРЅРѕ Р°РєС‚РёРІРЅРѕ РЅРµ Р±РѕР»РµРµ {GIVEAWAY_MAX_ACTIVE} СЂРѕР·С‹РіСЂС‹С€РµР№.",
         )
         + _admin_section_html(
             "Giveaways",
@@ -7895,7 +8136,7 @@ def _render_admin_audit_page(
     body = (
         _admin_page_header_html(
             "Audit Log",
-            "Журнал действий администратора по критичным операциям: approve/reject/restart/delete и связанные серверные действия.",
+            "Р–СѓСЂРЅР°Р» РґРµР№СЃС‚РІРёР№ Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂР° РїРѕ РєСЂРёС‚РёС‡РЅС‹Рј РѕРїРµСЂР°С†РёСЏРј: approve/reject/restart/delete Рё СЃРІСЏР·Р°РЅРЅС‹Рµ СЃРµСЂРІРµСЂРЅС‹Рµ РґРµР№СЃС‚РІРёСЏ.",
             actions_html="<a class='btn ghost' href='/admin/overview' style='text-decoration:none;'>Open overview</a>",
             icon="AL",
         )
@@ -7909,7 +8150,7 @@ def _render_admin_audit_page(
                 "</div>"
                 f"{pager_html}"
             ),
-            desc="Постраничный SSR-список. Детали обрезаются в таблице, полный JSON хранится в БД.",
+            desc="РџРѕСЃС‚СЂР°РЅРёС‡РЅС‹Р№ SSR-СЃРїРёСЃРѕРє. Р”РµС‚Р°Р»Рё РѕР±СЂРµР·Р°СЋС‚СЃСЏ РІ С‚Р°Р±Р»РёС†Рµ, РїРѕР»РЅС‹Р№ JSON С…СЂР°РЅРёС‚СЃСЏ РІ Р‘Р”.",
         )
     )
     return _render_admin_layout(
@@ -7987,7 +8228,7 @@ async def admin_login_submit(request: Request):
     admin_id_raw = form.get("admin_id", [""])[0].strip()
     password = form.get("password", [""])[0]
     if admin_id_raw != str(settings.admin_telegram_id) or password != settings.admin_panel_password:
-        return HTMLResponse(_render_admin_login_page("Неверный admin_id или пароль"), status_code=401)
+        return HTMLResponse(_render_admin_login_page("РќРµРІРµСЂРЅС‹Р№ admin_id РёР»Рё РїР°СЂРѕР»СЊ"), status_code=401)
 
     response = RedirectResponse("/admin/overview", status_code=303)
     response.set_cookie(
@@ -10183,13 +10424,13 @@ router = Router()
 bot_api_client = APIClient(base_url=settings.api_base_url, internal_token=settings.internal_api_token)
 BOT_USERNAME = ""
 
-BTN_PROFILE = "👤 Профиль"
-BTN_CONNECT = "⚡ Подключить"
-BTN_SERVERS = "🌐 Серверы"
-BTN_BALANCE = "💳 Баланс"
-BTN_TOPUP = "💳 Пополнить"
-BTN_GIVEAWAY = "🎁 Розыгрыш"
-BTN_HELP = "🆘 Помощь"
+BTN_PROFILE = "рџ‘¤ РџСЂРѕС„РёР»СЊ"
+BTN_CONNECT = "вљЎ РџРѕРґРєР»СЋС‡РёС‚СЊ"
+BTN_SERVERS = "рџЊђ РЎРµСЂРІРµСЂС‹"
+BTN_BALANCE = "рџ’і Р‘Р°Р»Р°РЅСЃ"
+BTN_TOPUP = "рџ’і РџРѕРїРѕР»РЅРёС‚СЊ"
+BTN_GIVEAWAY = "рџЋЃ Р РѕР·С‹РіСЂС‹С€"
+BTN_HELP = "рџ† РџРѕРјРѕС‰СЊ"
 
 SUPPORT_URL = "https://t.me/trumpvpnhelp"
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-08-15-17"
@@ -10204,7 +10445,7 @@ def _runtime_latency_text(runtime: dict[str, Any] | None) -> str:
 
 
 def _runtime_availability_text(runtime: dict[str, Any] | None) -> str:
-    return "доступен" if bool((runtime or {}).get("vpn_reachable", False)) else "недоступен"
+    return "РґРѕСЃС‚СѓРїРµРЅ" if bool((runtime or {}).get("vpn_reachable", False)) else "РЅРµРґРѕСЃС‚СѓРїРµРЅ"
 
 
 
@@ -10243,9 +10484,9 @@ def _welcome_channel_chat_id() -> str:
 def welcome_bonus_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Подписаться", url=settings.welcome_channel_url)],
-            [InlineKeyboardButton(text=f"✅ Получить +{settings.welcome_bonus_days} дня", callback_data="welcome:check")],
-            [InlineKeyboardButton(text="Позже", callback_data="welcome:skip")],
+            [InlineKeyboardButton(text="рџ“ў РџРѕРґРїРёСЃР°С‚СЊСЃСЏ", url=settings.welcome_channel_url)],
+            [InlineKeyboardButton(text=f"вњ… РџРѕР»СѓС‡РёС‚СЊ +{settings.welcome_bonus_days} РґРЅСЏ", callback_data="welcome:check")],
+            [InlineKeyboardButton(text="РџРѕР·Р¶Рµ", callback_data="welcome:skip")],
         ]
     )
 
@@ -10262,8 +10503,8 @@ async def _is_user_subscribed_to_welcome_channel(bot: Bot, user_id: int) -> bool
 def payment_kb(pay_url: str, invoice_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
-            [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"paycheck:{invoice_id}")],
+            [InlineKeyboardButton(text="рџ’і РћРїР»Р°С‚РёС‚СЊ", url=pay_url)],
+            [InlineKeyboardButton(text="рџ”„ РџСЂРѕРІРµСЂРёС‚СЊ РѕРїР»Р°С‚Сѓ", callback_data=f"paycheck:{invoice_id}")],
         ]
     )
 
@@ -10271,14 +10512,14 @@ def payment_kb(pay_url: str, invoice_id: int) -> InlineKeyboardMarkup:
 def _payment_gateways_available() -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     if settings.crypto_pay_api_token.strip():
-        rows.append(("cryptopay", "💎 Crypto Bot"))
+        rows.append(("cryptopay", "рџ’Ћ Crypto Bot"))
     if settings.platega_merchant_id.strip() and settings.platega_api_key.strip():
-        rows.append(("platega_crypto", "🔒Crypto"))
-        rows.append(("platega_card", "🇷🇺Карта"))
-        rows.append(("platega_sbp", "🇷🇺СБП"))
+        rows.append(("platega_crypto", "рџ”’Crypto"))
+        rows.append(("platega_card", "рџ‡·рџ‡єРљР°СЂС‚Р°"))
+        rows.append(("platega_sbp", "рџ‡·рџ‡єРЎР‘Рџ"))
     if not rows:
         # Fallback to current default; API will return clear error if not configured.
-        rows.append(((settings.payment_gateway or "cryptopay").strip().lower(), "💳 Оплата"))
+        rows.append(((settings.payment_gateway or "cryptopay").strip().lower(), "рџ’і РћРїР»Р°С‚Р°"))
     return rows
 
 
@@ -10286,22 +10527,22 @@ def choose_gateway_kb(amount_rub: int) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     for code, title in _payment_gateways_available():
         buttons.append([InlineKeyboardButton(text=title, callback_data=f"topup:gateway:{code}:{amount_rub}")])
-    buttons.append([InlineKeyboardButton(text="❌ Отменить", callback_data="topup:cancel")])
+    buttons.append([InlineKeyboardButton(text="вќЊ РћС‚РјРµРЅРёС‚СЊ", callback_data="topup:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def balance_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="topup:start")],
-            [InlineKeyboardButton(text="✅ Продлить подписку", callback_data="balance:renew")],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text="рџ’і РџРѕРїРѕР»РЅРёС‚СЊ Р±Р°Р»Р°РЅСЃ", callback_data="topup:start")],
+            [InlineKeyboardButton(text="вњ… РџСЂРѕРґР»РёС‚СЊ РїРѕРґРїРёСЃРєСѓ", callback_data="balance:renew")],
+            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
         ]
     )
 
 
 def _plan_months_label(plan: dict[str, Any]) -> str:
-    return str(plan.get("label") or "").strip() or "План"
+    return str(plan.get("label") or "").strip() or "РџР»Р°РЅ"
 
 
 def _plan_price_rub(plan: dict[str, Any]) -> int:
@@ -10321,27 +10562,27 @@ def renew_menu_kb() -> InlineKeyboardMarkup:
     for plan in SUBSCRIPTION_PLANS:
         label = _plan_months_label(plan)
         price = _plan_price_rub(plan)
-        emoji = "🗓️"
+        emoji = "рџ—“пёЏ"
         if str(plan.get("id")) == "m1":
-            emoji = "1️⃣"
+            emoji = "1пёЏвѓЈ"
         elif str(plan.get("id")) == "m3":
-            emoji = "3️⃣"
+            emoji = "3пёЏвѓЈ"
         elif str(plan.get("id")) == "m6":
-            emoji = "6️⃣"
+            emoji = "6пёЏвѓЈ"
         elif str(plan.get("id")) == "y1":
-            emoji = "🗓️"
-        text = f"{emoji} {label} — {price} RUB"
+            emoji = "рџ—“пёЏ"
+        text = f"{emoji} {label} вЂ” {price} RUB"
         rows.append([InlineKeyboardButton(text=text, callback_data=f"renew:plan:{plan['id']}")])
-    rows.append([InlineKeyboardButton(text="↩️ Назад к балансу", callback_data="menu:balance")])
-    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")])
+    rows.append([InlineKeyboardButton(text="в†©пёЏ РќР°Р·Р°Рґ Рє Р±Р°Р»Р°РЅСЃСѓ", callback_data="menu:balance")])
+    rows.append([InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def profile_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🎁 Реферальная система", callback_data="profile:ref")],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text="рџЋЃ Р РµС„РµСЂР°Р»СЊРЅР°СЏ СЃРёСЃС‚РµРјР°", callback_data="profile:ref")],
+            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
         ]
     )
 
@@ -10349,8 +10590,8 @@ def profile_kb() -> InlineKeyboardMarkup:
 def topup_cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отменить пополнение", callback_data="topup:cancel")],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text="вќЊ РћС‚РјРµРЅРёС‚СЊ РїРѕРїРѕР»РЅРµРЅРёРµ", callback_data="topup:cancel")],
+            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
         ]
     )
 
@@ -10360,12 +10601,12 @@ def connect_inactive_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="💳 Перейти к оплате",
+                    text="рџ’і РџРµСЂРµР№С‚Рё Рє РѕРїР»Р°С‚Рµ",
                     callback_data="menu:balance",
                 )
             ],
-            [InlineKeyboardButton(text="💳 Пополнить на другую сумму", callback_data="topup:start")],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text="рџ’і РџРѕРїРѕР»РЅРёС‚СЊ РЅР° РґСЂСѓРіСѓСЋ СЃСѓРјРјСѓ", callback_data="topup:start")],
+            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
         ]
     )
 
@@ -10373,9 +10614,9 @@ def connect_inactive_kb() -> InlineKeyboardMarkup:
 def connect_active_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔑 Ключ подключения", callback_data="connect:sub")],
-            [InlineKeyboardButton(text="💻 Устройства", callback_data="connect:devices")],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text="рџ”‘ РљР»СЋС‡ РїРѕРґРєР»СЋС‡РµРЅРёСЏ", callback_data="connect:sub")],
+            [InlineKeyboardButton(text="рџ’» РЈСЃС‚СЂРѕР№СЃС‚РІР°", callback_data="connect:devices")],
+            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
         ]
     )
 
@@ -10388,15 +10629,15 @@ def connect_devices_kb(active_configs: list[dict[str, Any]], can_add_device: boo
             continue
         device_name = str(cfg.get("device_name") or f"device-{cfg_id}")
         if len(device_name) > 18:
-            device_name = device_name[:17] + "…"
+            device_name = device_name[:17] + "вЂ¦"
         rows.append(
             [
-                InlineKeyboardButton(text=f"💻 {device_name}", callback_data=f"connect:devshow:{cfg_id}"),
-                InlineKeyboardButton(text="❌ Отключить", callback_data=f"connect:devdel:{cfg_id}"),
+                InlineKeyboardButton(text=f"рџ’» {device_name}", callback_data=f"connect:devshow:{cfg_id}"),
+                InlineKeyboardButton(text="вќЊ РћС‚РєР»СЋС‡РёС‚СЊ", callback_data=f"connect:devdel:{cfg_id}"),
             ]
         )
-    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="connect:devices")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад к подключению", callback_data="menu:connect")])
+    rows.append([InlineKeyboardButton(text="рџ”„ РћР±РЅРѕРІРёС‚СЊ", callback_data="connect:devices")])
+    rows.append([InlineKeyboardButton(text="в¬…пёЏ РќР°Р·Р°Рґ Рє РїРѕРґРєР»СЋС‡РµРЅРёСЋ", callback_data="menu:connect")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -10405,7 +10646,7 @@ def servers_overview_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=BTN_CONNECT, callback_data="menu:connect")],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
         ]
     )
 
@@ -10413,8 +10654,8 @@ def servers_overview_kb() -> InlineKeyboardMarkup:
 def help_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text="рџ† РџРѕРґРґРµСЂР¶РєР°", url=SUPPORT_URL)],
+            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
         ]
     )
 
@@ -10427,10 +10668,10 @@ def giveaways_kb(giveaways: list[dict[str, Any]]) -> InlineKeyboardMarkup:
         if gid <= 0:
             continue
         if joined:
-            rows.append([InlineKeyboardButton(text="✅ Участвую", callback_data="giveaway:joined")])
+            rows.append([InlineKeyboardButton(text="вњ… РЈС‡Р°СЃС‚РІСѓСЋ", callback_data="giveaway:joined")])
         else:
-            rows.append([InlineKeyboardButton(text="✅ Участвовать", callback_data=f"giveaway:join:{gid}")])
-    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")])
+            rows.append([InlineKeyboardButton(text="вњ… РЈС‡Р°СЃС‚РІРѕРІР°С‚СЊ", callback_data=f"giveaway:join:{gid}")])
+    rows.append([InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -10452,17 +10693,17 @@ def subscription_link_kb(telegram_id: int) -> InlineKeyboardMarkup:
         happ_download_url = SUPPORT_URL
     happ_is_safe_button_url = happ_url.startswith(("https://", "http://", "tg://"))
     happ_button = (
-        InlineKeyboardButton(text="➕ Добавить в HApp", url=happ_url)
+        InlineKeyboardButton(text="вћ• Р”РѕР±Р°РІРёС‚СЊ РІ HApp", url=happ_url)
         if happ_is_safe_button_url
-        else InlineKeyboardButton(text="➕ Добавить в HApp", callback_data="sub:happ")
+        else InlineKeyboardButton(text="вћ• Р”РѕР±Р°РІРёС‚СЊ РІ HApp", callback_data="sub:happ")
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [happ_button],
-            [InlineKeyboardButton(text="⬇️ Скачать HApp", url=happ_download_url)],
-            [InlineKeyboardButton(text="📘 Как установить", callback_data="sub:howto")],
-            [InlineKeyboardButton(text="⬅️ К профилю", callback_data="profile:open")],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text="в¬‡пёЏ РЎРєР°С‡Р°С‚СЊ HApp", url=happ_download_url)],
+            [InlineKeyboardButton(text="рџ“ РљР°Рє СѓСЃС‚Р°РЅРѕРІРёС‚СЊ", callback_data="sub:howto")],
+            [InlineKeyboardButton(text="в¬…пёЏ Рљ РїСЂРѕС„РёР»СЋ", callback_data="profile:open")],
+            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
         ]
     )
 
@@ -10473,11 +10714,11 @@ def profile_configs_kb(active_configs: list[dict[str, Any]]) -> InlineKeyboardMa
         cfg_id = int(cfg["id"])
         rows.append(
             [
-                InlineKeyboardButton(text=f"🔗 #{cfg_id} копировать", callback_data=f"profile:cfgcopy:{cfg_id}"),
-                InlineKeyboardButton(text=f"🗑 #{cfg_id} удалить", callback_data=f"profile:cfgdel:{cfg_id}"),
+                InlineKeyboardButton(text=f"рџ”— #{cfg_id} РєРѕРїРёСЂРѕРІР°С‚СЊ", callback_data=f"profile:cfgcopy:{cfg_id}"),
+                InlineKeyboardButton(text=f"рџ—‘ #{cfg_id} СѓРґР°Р»РёС‚СЊ", callback_data=f"profile:cfgdel:{cfg_id}"),
             ]
         )
-    rows.append([InlineKeyboardButton(text="⬅️ Профиль", callback_data="profile:open")])
+    rows.append([InlineKeyboardButton(text="в¬…пёЏ РџСЂРѕС„РёР»СЊ", callback_data="profile:open")])
     return InlineKeyboardMarkup(
         inline_keyboard=rows
     )
@@ -10560,9 +10801,9 @@ async def show_main_menu(message: Message) -> None:
         message,
         (
             "TrumpVPN\n"
-            "✨ Быстрый и стабильный VPN\n\n"
-            f"💳 Базовый тариф: {settings.subscription_price_rub} RUB / {settings.subscription_days_per_month} дней\n"
-            "🔗 Нажмите «Подключить», чтобы получить ссылку"
+            "вњЁ Р‘С‹СЃС‚СЂС‹Р№ Рё СЃС‚Р°Р±РёР»СЊРЅС‹Р№ VPN\n\n"
+            f"рџ’і Р‘Р°Р·РѕРІС‹Р№ С‚Р°СЂРёС„: {settings.subscription_price_rub} RUB / {settings.subscription_days_per_month} РґРЅРµР№\n"
+            "рџ”— РќР°Р¶РјРёС‚Рµ В«РџРѕРґРєР»СЋС‡РёС‚СЊВ», С‡С‚РѕР±С‹ РїРѕР»СѓС‡РёС‚СЊ СЃСЃС‹Р»РєСѓ"
         ),
         reply_markup=main_menu_kb(),
     )
@@ -10572,13 +10813,13 @@ async def show_help_screen(message: Message) -> None:
     await _upsert_message(
         message,
         (
-            "Помощь\n\n"
-            "1. Нажмите «Подключить» и получите ссылку подписки.\n"
-            "2. Добавьте ссылку в VPN-клиент (HApp, Hiddify, v2rayNG).\n"
-            "3. Нажмите Update/Import и включите VPN.\n\n"
-            f"🔒 Политика конфиденциальности: <a href=\"{PRIVACY_POLICY_URL}\">читать</a>\n"
-            f"📜 Пользовательское соглашение: <a href=\"{TERMS_OF_USE_URL}\">читать</a>\n\n"
-            f"Поддержка: {SUPPORT_URL}"
+            "РџРѕРјРѕС‰СЊ\n\n"
+            "1. РќР°Р¶РјРёС‚Рµ В«РџРѕРґРєР»СЋС‡РёС‚СЊВ» Рё РїРѕР»СѓС‡РёС‚Рµ СЃСЃС‹Р»РєСѓ РїРѕРґРїРёСЃРєРё.\n"
+            "2. Р”РѕР±Р°РІСЊС‚Рµ СЃСЃС‹Р»РєСѓ РІ VPN-РєР»РёРµРЅС‚ (HApp, Hiddify, v2rayNG).\n"
+            "3. РќР°Р¶РјРёС‚Рµ Update/Import Рё РІРєР»СЋС‡РёС‚Рµ VPN.\n\n"
+            f"рџ”’ РџРѕР»РёС‚РёРєР° РєРѕРЅС„РёРґРµРЅС†РёР°Р»СЊРЅРѕСЃС‚Рё: <a href=\"{PRIVACY_POLICY_URL}\">С‡РёС‚Р°С‚СЊ</a>\n"
+            f"рџ“њ РџРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРѕРµ СЃРѕРіР»Р°С€РµРЅРёРµ: <a href=\"{TERMS_OF_USE_URL}\">С‡РёС‚Р°С‚СЊ</a>\n\n"
+            f"РџРѕРґРґРµСЂР¶РєР°: {SUPPORT_URL}"
         ),
         reply_markup=help_kb(),
         parse_mode="HTML",
@@ -10593,23 +10834,23 @@ async def show_giveaways_screen(message: Message) -> None:
         await _upsert_message(message, str(exc), reply_markup=main_menu_kb())
         return
     if not giveaways:
-        await _upsert_message(message, "Активных розыгрышей пока нет.", reply_markup=giveaways_kb([]))
+        await _upsert_message(message, "РђРєС‚РёРІРЅС‹С… СЂРѕР·С‹РіСЂС‹С€РµР№ РїРѕРєР° РЅРµС‚.", reply_markup=giveaways_kb([]))
         return
-    lines: list[str] = ["🎁 Активные розыгрыши:"]
+    lines: list[str] = ["рџЋЃ РђРєС‚РёРІРЅС‹Рµ СЂРѕР·С‹РіСЂС‹С€Рё:"]
     for idx, g in enumerate(giveaways, start=1):
-        title = str(g.get("title") or f"Розыгрыш #{g.get('id')}").strip()
+        title = str(g.get("title") or f"Р РѕР·С‹РіСЂС‹С€ #{g.get('id')}").strip()
         lines.append(f"{idx}. {title}")
         if g.get("description"):
             lines.append(str(g.get("description")).strip())
         if g.get("prize"):
-            lines.append(f"Приз: {g.get('prize')}")
-        lines.append(f"Период: {_format_giveaway_period(g.get('starts_at'), g.get('ends_at'))}")
+            lines.append(f"РџСЂРёР·: {g.get('prize')}")
+        lines.append(f"РџРµСЂРёРѕРґ: {_format_giveaway_period(g.get('starts_at'), g.get('ends_at'))}")
         kind = str(g.get("kind") or "")
-        lines.append(f"Условие: {_giveaway_condition_text(kind)}")
+        lines.append(f"РЈСЃР»РѕРІРёРµ: {_giveaway_condition_text(kind)}")
         participants = int(g.get("participants") or 0)
-        lines.append(f"Участники: {participants}")
+        lines.append(f"РЈС‡Р°СЃС‚РЅРёРєРё: {participants}")
         if kind == GIVEAWAY_KIND_CHANNEL_SUB:
-            lines.append(f"Группа: {settings.welcome_channel_url}")
+            lines.append(f"Р“СЂСѓРїРїР°: {settings.welcome_channel_url}")
         lines.append("")
     await _upsert_message(message, "\n".join(lines).rstrip(), reply_markup=giveaways_kb(giveaways))
 
@@ -10617,9 +10858,9 @@ async def show_giveaways_screen(message: Message) -> None:
 async def show_servers_screen(message: Message) -> None:
     rows = await bot_api_client.servers_runtime()
     if not rows:
-        await _upsert_message(message, "Серверов пока нет.", reply_markup=main_menu_kb())
+        await _upsert_message(message, "РЎРµСЂРІРµСЂРѕРІ РїРѕРєР° РЅРµС‚.", reply_markup=main_menu_kb())
         return
-    lines = ["Серверы (статус и задержка):"]
+    lines = ["РЎРµСЂРІРµСЂС‹ (СЃС‚Р°С‚СѓСЃ Рё Р·Р°РґРµСЂР¶РєР°):"]
     for s in rows:
         runtime = s.get("runtime", {})
         circle = _runtime_circle(runtime)
@@ -10628,7 +10869,7 @@ async def show_servers_screen(message: Message) -> None:
         latency_text = _runtime_latency_text(runtime)
         lines.append(f"{circle} {s['name']} | {status} | {avail_text} | {latency_text}")
     lines.append("")
-    lines.append("Подключение выполняется через кнопку «Подключить».")
+    lines.append("РџРѕРґРєР»СЋС‡РµРЅРёРµ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ С‡РµСЂРµР· РєРЅРѕРїРєСѓ В«РџРѕРґРєР»СЋС‡РёС‚СЊВ».")
     await _upsert_message(message, "\n".join(lines), reply_markup=servers_overview_kb())
 
 
@@ -10644,11 +10885,11 @@ async def show_connect_screen(message: Message, telegram_id: int) -> None:
         await _upsert_message(
             message,
             (
-                "Подключение\n\n"
-                "Подписка активна.\n"
-                f"Осталось дней: {days_left}\n"
-                f"Устройств подключено: {len(active_devices)} из {MAX_ACTIVE_CONFIGS_PER_USER}.\n\n"
-                "Откройте ссылку подписки и добавьте ее в клиент."
+                "РџРѕРґРєР»СЋС‡РµРЅРёРµ\n\n"
+                "РџРѕРґРїРёСЃРєР° Р°РєС‚РёРІРЅР°.\n"
+                f"РћСЃС‚Р°Р»РѕСЃСЊ РґРЅРµР№: {days_left}\n"
+                f"РЈСЃС‚СЂРѕР№СЃС‚РІ РїРѕРґРєР»СЋС‡РµРЅРѕ: {len(active_devices)} РёР· {MAX_ACTIVE_CONFIGS_PER_USER}.\n\n"
+                "РћС‚РєСЂРѕР№С‚Рµ СЃСЃС‹Р»РєСѓ РїРѕРґРїРёСЃРєРё Рё РґРѕР±Р°РІСЊС‚Рµ РµРµ РІ РєР»РёРµРЅС‚."
             ),
             reply_markup=connect_active_kb(),
         )
@@ -10656,11 +10897,11 @@ async def show_connect_screen(message: Message, telegram_id: int) -> None:
     await _upsert_message(
         message,
         (
-            "Подключение\n\n"
-            "Подписка неактивна.\n"
-            f"Баланс: {int(user.get('balance_rub', 0))} RUB\n\n"
-            "Перейдите в «Баланс и продление» и выберите удобный период.\n"
-            "Чем дольше период — тем выгоднее."
+            "РџРѕРґРєР»СЋС‡РµРЅРёРµ\n\n"
+            "РџРѕРґРїРёСЃРєР° РЅРµР°РєС‚РёРІРЅР°.\n"
+            f"Р‘Р°Р»Р°РЅСЃ: {int(user.get('balance_rub', 0))} RUB\n\n"
+            "РџРµСЂРµР№РґРёС‚Рµ РІ В«Р‘Р°Р»Р°РЅСЃ Рё РїСЂРѕРґР»РµРЅРёРµВ» Рё РІС‹Р±РµСЂРёС‚Рµ СѓРґРѕР±РЅС‹Р№ РїРµСЂРёРѕРґ.\n"
+            "Р§РµРј РґРѕР»СЊС€Рµ РїРµСЂРёРѕРґ вЂ” С‚РµРј РІС‹РіРѕРґРЅРµРµ."
         ),
         reply_markup=connect_inactive_kb(),
     )
@@ -10675,21 +10916,21 @@ async def show_connect_devices_screen(message: Message, telegram_id: int) -> Non
     active_devices = _active_devices_from_user_payload(user)
     can_add_device = bool(user.get("subscription_active"))
     lines = [
-        "Подключенные устройства",
+        "РџРѕРґРєР»СЋС‡РµРЅРЅС‹Рµ СѓСЃС‚СЂРѕР№СЃС‚РІР°",
         "",
-        f"Всего: {len(active_devices)} из {MAX_ACTIVE_CONFIGS_PER_USER} доступных",
+        f"Р’СЃРµРіРѕ: {len(active_devices)} РёР· {MAX_ACTIVE_CONFIGS_PER_USER} РґРѕСЃС‚СѓРїРЅС‹С…",
         "",
     ]
     if not active_devices:
-        lines.append("Пока нет подключенных устройств.")
+        lines.append("РџРѕРєР° РЅРµС‚ РїРѕРґРєР»СЋС‡РµРЅРЅС‹С… СѓСЃС‚СЂРѕР№СЃС‚РІ.")
     else:
         for idx, cfg in enumerate(active_devices[:MAX_ACTIVE_CONFIGS_PER_USER], start=1):
             lines.append(f"{idx}. {cfg.get('device_name', '-')}")
     lines.extend(
         [
             "",
-            "Нажмите «Отключить», чтобы удалить устройство из списка.",
-            "Добавление устройств вручную отключено — используйте общую ссылку подписки.",
+            "РќР°Р¶РјРёС‚Рµ В«РћС‚РєР»СЋС‡РёС‚СЊВ», С‡С‚РѕР±С‹ СѓРґР°Р»РёС‚СЊ СѓСЃС‚СЂРѕР№СЃС‚РІРѕ РёР· СЃРїРёСЃРєР°.",
+            "Р”РѕР±Р°РІР»РµРЅРёРµ СѓСЃС‚СЂРѕР№СЃС‚РІ РІСЂСѓС‡РЅСѓСЋ РѕС‚РєР»СЋС‡РµРЅРѕ вЂ” РёСЃРїРѕР»СЊР·СѓР№С‚Рµ РѕР±С‰СѓСЋ СЃСЃС‹Р»РєСѓ РїРѕРґРїРёСЃРєРё.",
         ]
     )
     await _upsert_message(
@@ -10704,9 +10945,9 @@ async def send_payment_created(message: Message, invoice: dict[str, Any]) -> Non
         "cryptopay": "Crypto Bot",
         "platega": "Platega",
         "platega_crypto": "crypto",
-        "platega_card": "🇷🇺Карта",
-        "platega_sbp": "🇷🇺СБП",
-        "yoomoney": "ЮMoney",
+        "platega_card": "рџ‡·рџ‡єРљР°СЂС‚Р°",
+        "platega_sbp": "рџ‡·рџ‡єРЎР‘Рџ",
+        "yoomoney": "Р®Money",
     }
     gw = str(invoice.get("gateway", "")).lower()
     gw_title = gateway_map.get(gw, gw or "unknown")
@@ -10714,21 +10955,21 @@ async def send_payment_created(message: Message, invoice: dict[str, Any]) -> Non
     payable = int(invoice.get("payable_rub", amount_face))
     discount_percent = int(invoice.get("promo_discount_percent", 0) or 0)
     promo_code = str(invoice.get("promo_code") or "").strip()
-    amount_line = f"Сумма к оплате: {payable} RUB"
+    amount_line = f"РЎСѓРјРјР° Рє РѕРїР»Р°С‚Рµ: {payable} RUB"
     if discount_percent > 0 and payable < amount_face:
         amount_line = (
-            f"Сумма: {amount_face} RUB\n"
-            f"Скидка: {discount_percent}% ({promo_code or 'promo'})\n"
-            f"К оплате: {payable} RUB"
+            f"РЎСѓРјРјР°: {amount_face} RUB\n"
+            f"РЎРєРёРґРєР°: {discount_percent}% ({promo_code or 'promo'})\n"
+            f"Рљ РѕРїР»Р°С‚Рµ: {payable} RUB"
         )
     await _upsert_message(
         message,
         (
-            "Счет создан.\n\n"
-            f"Способ оплаты: {gw_title}\n"
+            "РЎС‡РµС‚ СЃРѕР·РґР°РЅ.\n\n"
+            f"РЎРїРѕСЃРѕР± РѕРїР»Р°С‚С‹: {gw_title}\n"
             f"{amount_line}\n"
             f"Invoice ID: {invoice['invoice_id']}\n\n"
-            "После оплаты нажмите кнопку проверки."
+            "РџРѕСЃР»Рµ РѕРїР»Р°С‚С‹ РЅР°Р¶РјРёС‚Рµ РєРЅРѕРїРєСѓ РїСЂРѕРІРµСЂРєРё."
         ),
         reply_markup=payment_kb(invoice["pay_url"], invoice["invoice_id"]),
     )
@@ -10746,9 +10987,9 @@ async def send_device_subscription_link(message: Message, telegram_id: int, devi
     sub_url = build_user_subscription_url_for_device(telegram_id, device_name=device_name)
     await message.answer(
         (
-            f"Subscription URL для устройства «{device_name}»:\n"
+            f"Subscription URL РґР»СЏ СѓСЃС‚СЂРѕР№СЃС‚РІР° В«{device_name}В»:\n"
             f"<code>{escape(sub_url)}</code>\n\n"
-            "Добавьте этот URL в клиент, чтобы получить все доступные серверы для устройства."
+            "Р”РѕР±Р°РІСЊС‚Рµ СЌС‚РѕС‚ URL РІ РєР»РёРµРЅС‚, С‡С‚РѕР±С‹ РїРѕР»СѓС‡РёС‚СЊ РІСЃРµ РґРѕСЃС‚СѓРїРЅС‹Рµ СЃРµСЂРІРµСЂС‹ РґР»СЏ СѓСЃС‚СЂРѕР№СЃС‚РІР°."
         ),
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -10796,9 +11037,9 @@ def _subscription_status_summary(user: dict[str, Any]) -> dict[str, Any]:
     until_dt = _parse_api_datetime(until_raw)
     now = utc_now()
     if not until_dt:
-        return {"status": "неактивна", "days_left": 0, "until_text": "-", "is_active": False}
+        return {"status": "РЅРµР°РєС‚РёРІРЅР°", "days_left": 0, "until_text": "-", "is_active": False}
     is_active = until_dt > now
-    status = "активна" if is_active else "истекла"
+    status = "Р°РєС‚РёРІРЅР°" if is_active else "РёСЃС‚РµРєР»Р°"
     return {
         "status": status,
         "days_left": _subscription_days_left(until_raw) if is_active else 0,
@@ -10816,31 +11057,31 @@ def _format_giveaway_period(starts_at: str | None, ends_at: str | None) -> str:
         return dt.replace(tzinfo=timezone.utc).astimezone(msk_tz).strftime("%d.%m.%Y %H:%M MSK")
 
     if start_dt and end_dt:
-        return f"{fmt(start_dt)} — {fmt(end_dt)}"
+        return f"{fmt(start_dt)} вЂ” {fmt(end_dt)}"
     if start_dt:
-        return f"с {fmt(start_dt)}"
+        return f"СЃ {fmt(start_dt)}"
     if end_dt:
-        return f"до {fmt(end_dt)}"
-    return "без ограничений"
+        return f"РґРѕ {fmt(end_dt)}"
+    return "Р±РµР· РѕРіСЂР°РЅРёС‡РµРЅРёР№"
 
 
 def _build_profile_text(user: dict[str, Any]) -> str:
     summary = _subscription_status_summary(user)
-    status_emoji = "🟢" if summary["is_active"] else "🔴"
+    status_emoji = "рџџў" if summary["is_active"] else "рџ”ґ"
     lines = [
-        "Личный кабинет",
-        f"💳 Баланс: {user.get('balance_rub', 0)} RUB",
-        f"{status_emoji} Подписка: {summary['status']}",
+        "Р›РёС‡РЅС‹Р№ РєР°Р±РёРЅРµС‚",
+        f"рџ’і Р‘Р°Р»Р°РЅСЃ: {user.get('balance_rub', 0)} RUB",
+        f"{status_emoji} РџРѕРґРїРёСЃРєР°: {summary['status']}",
     ]
     if summary["is_active"]:
-        lines.append(f"📆 Осталось дней: {summary['days_left']}")
-        lines.append(f"⏳ До: {summary['until_text']}")
+        lines.append(f"рџ“† РћСЃС‚Р°Р»РѕСЃСЊ РґРЅРµР№: {summary['days_left']}")
+        lines.append(f"вЏі Р”Рѕ: {summary['until_text']}")
     else:
-        lines.append("⏳ До: -")
+        lines.append("вЏі Р”Рѕ: -")
     lines.extend(
         [
             "",
-            "Продлите заранее, чтобы доступ не прерывался.",
+            "РџСЂРѕРґР»РёС‚Рµ Р·Р°СЂР°РЅРµРµ, С‡С‚РѕР±С‹ РґРѕСЃС‚СѓРї РЅРµ РїСЂРµСЂС‹РІР°Р»СЃСЏ.",
         ]
     )
     return "\n".join(lines)
@@ -10850,17 +11091,17 @@ def _build_configs_text(user: dict[str, Any]) -> str:
     configs = list(user.get("configs") or [])
     active = [cfg for cfg in configs if cfg.get("is_active")]
     lines = [
-        "Конфиги",
+        "РљРѕРЅС„РёРіРё",
         "",
-        f"Активные серверы: {len(active)}",
+        f"РђРєС‚РёРІРЅС‹Рµ СЃРµСЂРІРµСЂС‹: {len(active)}",
     ]
     if not active:
-        lines.append("Активных конфигов нет.")
+        lines.append("РђРєС‚РёРІРЅС‹С… РєРѕРЅС„РёРіРѕРІ РЅРµС‚.")
         return "\n".join(lines)
     for cfg in active[:15]:
         lines.append(f"#{cfg['id']} {cfg['server_name']} / {cfg['device_name']} [ACTIVE]")
     if len(active) > 15:
-        lines.append(f"... и еще {len(active) - 15}")
+        lines.append(f"... Рё РµС‰Рµ {len(active) - 15}")
     return "\n".join(lines)
 
 
@@ -10868,16 +11109,16 @@ def _build_referral_text(user: dict[str, Any]) -> str:
     percent = referral_topup_bonus_percent()
     return "\n".join(
         [
-            "Реферальная система",
+            "Р РµС„РµСЂР°Р»СЊРЅР°СЏ СЃРёСЃС‚РµРјР°",
             "",
-            "Бонусы:",
-            "• +3 дня вам и другу за приглашение",
-            "• +7 дней вам, если друг оплатит в течение 7 дней",
-            f"• +{percent}% с пополнений приглашённых",
+            "Р‘РѕРЅСѓСЃС‹:",
+            "вЂў +3 РґРЅСЏ РІР°Рј Рё РґСЂСѓРіСѓ Р·Р° РїСЂРёРіР»Р°С€РµРЅРёРµ",
+            "вЂў +7 РґРЅРµР№ РІР°Рј, РµСЃР»Рё РґСЂСѓРі РѕРїР»Р°С‚РёС‚ РІ С‚РµС‡РµРЅРёРµ 7 РґРЅРµР№",
+            f"вЂў +{percent}% СЃ РїРѕРїРѕР»РЅРµРЅРёР№ РїСЂРёРіР»Р°С€С‘РЅРЅС‹С…",
             "",
-            f"Приглашено: {user.get('invited_count', 0)}",
-            f"Заработано бонусов: {user.get('referral_bonus_rub', 0)} RUB",
-            f"Ссылка: {_user_ref_link(user['telegram_id'])}",
+            f"РџСЂРёРіР»Р°С€РµРЅРѕ: {user.get('invited_count', 0)}",
+            f"Р—Р°СЂР°Р±РѕС‚Р°РЅРѕ Р±РѕРЅСѓСЃРѕРІ: {user.get('referral_bonus_rub', 0)} RUB",
+            f"РЎСЃС‹Р»РєР°: {_user_ref_link(user['telegram_id'])}",
         ]
     )
 
@@ -10922,7 +11163,7 @@ def _resolve_message_telegram_id(message: Message, fallback: int | None = None) 
 async def show_balance(message: Message, telegram_id: int | None = None) -> None:
     effective_id = _resolve_message_telegram_id(message, telegram_id)
     if effective_id <= 0:
-        await _upsert_message(message, "Не удалось определить пользователя.", reply_markup=main_menu_kb())
+        await _upsert_message(message, "РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ.", reply_markup=main_menu_kb())
         return
     try:
         user = await bot_api_client.get_user(effective_id, with_stats=True)
@@ -10931,33 +11172,33 @@ async def show_balance(message: Message, telegram_id: int | None = None) -> None
         return
 
     summary = _subscription_status_summary(user)
-    status_emoji = "🟢" if summary["is_active"] else "🔴"
+    status_emoji = "рџџў" if summary["is_active"] else "рџ”ґ"
     traffic_total = int(user.get("traffic_total", 0) or 0)
     traffic_up = int(user.get("traffic_upload", 0) or 0)
     traffic_down = int(user.get("traffic_download", 0) or 0)
     lines = [
-        "Баланс",
-        f"💳 Баланс: {user.get('balance_rub', 0)} RUB",
-        f"{status_emoji} Подписка: {summary['status']}",
+        "Р‘Р°Р»Р°РЅСЃ",
+        f"рџ’і Р‘Р°Р»Р°РЅСЃ: {user.get('balance_rub', 0)} RUB",
+        f"{status_emoji} РџРѕРґРїРёСЃРєР°: {summary['status']}",
     ]
     if summary["is_active"]:
-        lines.append(f"📆 Осталось дней: {summary['days_left']}")
-        lines.append(f"⏳ До: {summary['until_text']}")
+        lines.append(f"рџ“† РћСЃС‚Р°Р»РѕСЃСЊ РґРЅРµР№: {summary['days_left']}")
+        lines.append(f"вЏі Р”Рѕ: {summary['until_text']}")
     else:
-        lines.append("⏳ До: -")
-        lines.append("📆 Осталось дней: 0")
+        lines.append("вЏі Р”Рѕ: -")
+        lines.append("рџ“† РћСЃС‚Р°Р»РѕСЃСЊ РґРЅРµР№: 0")
     if traffic_total > 0:
-        lines.append(f"📶 Трафик: {_format_bytes_short(traffic_total)}")
-        lines.append(f"📥 Получено: {_format_bytes_short(traffic_down)}")
-        lines.append(f"📤 Отправлено: {_format_bytes_short(traffic_up)}")
+        lines.append(f"рџ“¶ РўСЂР°С„РёРє: {_format_bytes_short(traffic_total)}")
+        lines.append(f"рџ“Ґ РџРѕР»СѓС‡РµРЅРѕ: {_format_bytes_short(traffic_down)}")
+        lines.append(f"рџ“¤ РћС‚РїСЂР°РІР»РµРЅРѕ: {_format_bytes_short(traffic_up)}")
     else:
-        lines.append("📶 Трафик: -")
+        lines.append("рџ“¶ РўСЂР°С„РёРє: -")
     lines.extend(
         [
             "",
-            "Рефералы",
-            f"👥 Приглашено: {user.get('invited_count', 0)}",
-            f"🎁 Бонус: {user.get('referral_bonus_rub', 0)} RUB",
+            "Р РµС„РµСЂР°Р»С‹",
+            f"рџ‘Ґ РџСЂРёРіР»Р°С€РµРЅРѕ: {user.get('invited_count', 0)}",
+            f"рџЋЃ Р‘РѕРЅСѓСЃ: {user.get('referral_bonus_rub', 0)} RUB",
         ]
     )
     await _upsert_message(message, "\n".join(lines), reply_markup=balance_kb(), disable_web_page_preview=True)
@@ -10966,22 +11207,22 @@ async def show_balance(message: Message, telegram_id: int | None = None) -> None
 def _build_renew_menu_text(user: dict[str, Any]) -> str:
     balance = int(user.get("balance_rub", 0))
     lines = [
-        "Продление подписки",
+        "РџСЂРѕРґР»РµРЅРёРµ РїРѕРґРїРёСЃРєРё",
         "",
-        "Выберите период — чем дольше, тем выгоднее.",
+        "Р’С‹Р±РµСЂРёС‚Рµ РїРµСЂРёРѕРґ вЂ” С‡РµРј РґРѕР»СЊС€Рµ, С‚РµРј РІС‹РіРѕРґРЅРµРµ.",
         "",
     ]
     for plan in SUBSCRIPTION_PLANS:
         label = _plan_months_label(plan)
         price = _plan_price_rub(plan)
         savings = _plan_savings_rub(plan)
-        suffix = f" · экономия {savings} RUB" if savings > 0 else ""
+        suffix = f" В· СЌРєРѕРЅРѕРјРёСЏ {savings} RUB" if savings > 0 else ""
         lines.append(f"{label}: {price} RUB{suffix}")
     lines.extend(
         [
             "",
-            f"Ваш баланс: {balance} RUB",
-            "Продление будет активировано сразу после списания.",
+            f"Р’Р°С€ Р±Р°Р»Р°РЅСЃ: {balance} RUB",
+            "РџСЂРѕРґР»РµРЅРёРµ Р±СѓРґРµС‚ Р°РєС‚РёРІРёСЂРѕРІР°РЅРѕ СЃСЂР°Р·Сѓ РїРѕСЃР»Рµ СЃРїРёСЃР°РЅРёСЏ.",
         ]
     )
     return "\n".join(lines)
@@ -10994,18 +11235,18 @@ def _build_insufficient_balance_text(plan: dict[str, Any], balance: int) -> str:
     suggested_topup = max(missing, int(settings.min_topup_rub))
     note = ""
     if suggested_topup > missing:
-        note = f"Минимальное пополнение: {suggested_topup} RUB"
+        note = f"РњРёРЅРёРјР°Р»СЊРЅРѕРµ РїРѕРїРѕР»РЅРµРЅРёРµ: {suggested_topup} RUB"
     return "\n".join(
         [
-            "Недостаточно средств для продления.",
+            "РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ СЃСЂРµРґСЃС‚РІ РґР»СЏ РїСЂРѕРґР»РµРЅРёСЏ.",
             "",
-            f"План: {label}",
-            f"Стоимость: {price} RUB",
-            f"Баланс: {balance} RUB",
-            f"Не хватает: {missing} RUB",
+            f"РџР»Р°РЅ: {label}",
+            f"РЎС‚РѕРёРјРѕСЃС‚СЊ: {price} RUB",
+            f"Р‘Р°Р»Р°РЅСЃ: {balance} RUB",
+            f"РќРµ С…РІР°С‚Р°РµС‚: {missing} RUB",
             note,
             "",
-            "Пополните баланс на нужную сумму — и подписка продлится сразу.",
+            "РџРѕРїРѕР»РЅРёС‚Рµ Р±Р°Р»Р°РЅСЃ РЅР° РЅСѓР¶РЅСѓСЋ СЃСѓРјРјСѓ вЂ” Рё РїРѕРґРїРёСЃРєР° РїСЂРѕРґР»РёС‚СЃСЏ СЃСЂР°Р·Сѓ.",
         ]
     )
 
@@ -11030,17 +11271,17 @@ async def send_subscription_link(message: Message, telegram_id: int) -> None:
     warning = ""
     if "127.0.0.1" in sub_url or "localhost" in sub_url:
         warning = (
-            "\n\nВнимание: ссылка сейчас указывает на localhost. "
-            "Задай PUBLIC_API_BASE_URL в .env (например, https://vpn.example.com)."
+            "\n\nР’РЅРёРјР°РЅРёРµ: СЃСЃС‹Р»РєР° СЃРµР№С‡Р°СЃ СѓРєР°Р·С‹РІР°РµС‚ РЅР° localhost. "
+            "Р—Р°РґР°Р№ PUBLIC_API_BASE_URL РІ .env (РЅР°РїСЂРёРјРµСЂ, https://vpn.example.com)."
         )
     await _upsert_message(
         message,
         (
-            "Ссылка подключения (Subscription URL):\n"
+            "РЎСЃС‹Р»РєР° РїРѕРґРєР»СЋС‡РµРЅРёСЏ (Subscription URL):\n"
             f"<code>{escape(sub_url)}</code>\n\n"
-            f"Осталось дней: {days_left}\n"
-            "Добавьте эту ссылку в VPN-клиент в разделе подписок.\n"
-            "Для HApp используйте кнопку «Добавить в HApp» — устройство добавится автоматически."
+            f"РћСЃС‚Р°Р»РѕСЃСЊ РґРЅРµР№: {days_left}\n"
+            "Р”РѕР±Р°РІСЊС‚Рµ СЌС‚Сѓ СЃСЃС‹Р»РєСѓ РІ VPN-РєР»РёРµРЅС‚ РІ СЂР°Р·РґРµР»Рµ РїРѕРґРїРёСЃРѕРє.\n"
+            "Р”Р»СЏ HApp РёСЃРїРѕР»СЊР·СѓР№С‚Рµ РєРЅРѕРїРєСѓ В«Р”РѕР±Р°РІРёС‚СЊ РІ HAppВ» вЂ” СѓСЃС‚СЂРѕР№СЃС‚РІРѕ РґРѕР±Р°РІРёС‚СЃСЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё."
             f"{warning}"
         ),
         parse_mode="HTML",
@@ -11059,17 +11300,17 @@ async def start_handler(message: Message):
     )
     await _remove_legacy_keyboard(message)
     start_caption = (
-        "💜 TRUMP VPN - Самый стабильный VPN\n\n"
-        "⚡ Преимущества:\n"
-        "└─ 🇷🇺Рабочий мобильный интернет\n"
-        "└─ 💶Низкие цены\n"
-        "└─ 🚀Низкая задержка\n"
-        "└─ ✅Быстрое подключение/стабильность\n\n"
-        "🌐 Локации:\n"
-        "🇳🇱·🇩🇪·🇸🇪 1Gb/s\n"
-        "🇳🇱·🇺🇸·🇫🇷·🇵🇱10Gb/s\n"
-        "🇺🇸 25Gb/s\n\n"
-        "Панель управления ⬇️"
+        "рџ’њ TRUMP VPN - РЎР°РјС‹Р№ СЃС‚Р°Р±РёР»СЊРЅС‹Р№ VPN\n\n"
+        "вљЎ РџСЂРµРёРјСѓС‰РµСЃС‚РІР°:\n"
+        "в””в”Ђ рџ‡·рџ‡єР Р°Р±РѕС‡РёР№ РјРѕР±РёР»СЊРЅС‹Р№ РёРЅС‚РµСЂРЅРµС‚\n"
+        "в””в”Ђ рџ’¶РќРёР·РєРёРµ С†РµРЅС‹\n"
+        "в””в”Ђ рџљЂРќРёР·РєР°СЏ Р·Р°РґРµСЂР¶РєР°\n"
+        "в””в”Ђ вњ…Р‘С‹СЃС‚СЂРѕРµ РїРѕРґРєР»СЋС‡РµРЅРёРµ/СЃС‚Р°Р±РёР»СЊРЅРѕСЃС‚СЊ\n\n"
+        "рџЊђ Р›РѕРєР°С†РёРё:\n"
+        "рџ‡ірџ‡±В·рџ‡©рџ‡ЄВ·рџ‡ёрџ‡Є 1Gb/s\n"
+        "рџ‡ірџ‡±В·рџ‡єрџ‡ёВ·рџ‡«рџ‡·В·рџ‡µрџ‡±10Gb/s\n"
+        "рџ‡єрџ‡ё 25Gb/s\n\n"
+        "РџР°РЅРµР»СЊ СѓРїСЂР°РІР»РµРЅРёСЏ в¬‡пёЏ"
     )
     if START_PROMO_IMAGE_PATH.exists():
         try:
@@ -11085,9 +11326,9 @@ async def start_handler(message: Message):
     if user.get("is_new") and not user.get("trial_bonus_granted"):
         await message.answer(
             (
-                "Подпишись на канал и получи бесплатные дни подписки.\n\n"
-                f"Канал: {settings.welcome_channel_url}\n"
-                f"Бонус: +{max(1, int(settings.welcome_bonus_days))} дня"
+                "РџРѕРґРїРёС€РёСЃСЊ РЅР° РєР°РЅР°Р» Рё РїРѕР»СѓС‡Рё Р±РµСЃРїР»Р°С‚РЅС‹Рµ РґРЅРё РїРѕРґРїРёСЃРєРё.\n\n"
+                f"РљР°РЅР°Р»: {settings.welcome_channel_url}\n"
+                f"Р‘РѕРЅСѓСЃ: +{max(1, int(settings.welcome_bonus_days))} РґРЅСЏ"
             ),
             reply_markup=welcome_bonus_kb(),
             disable_web_page_preview=True,
@@ -11117,7 +11358,7 @@ async def topup_handler(message: Message, state: FSMContext):
         amount_rub = int(parts[1])
         await _upsert_message(
             message,
-            f"Выбери способ оплаты для {amount_rub} RUB:",
+            f"Р’С‹Р±РµСЂРё СЃРїРѕСЃРѕР± РѕРїР»Р°С‚С‹ РґР»СЏ {amount_rub} RUB:",
             reply_markup=choose_gateway_kb(amount_rub),
         )
         return
@@ -11125,9 +11366,9 @@ async def topup_handler(message: Message, state: FSMContext):
     await _upsert_message(
         message,
         (
-            f"Введите сумму пополнения в RUB (от {settings.min_topup_rub} до {settings.max_topup_rub}).\n"
-            "Пример: 500\n"
-            "Для отмены нажмите кнопку ниже."
+            f"Р’РІРµРґРёС‚Рµ СЃСѓРјРјСѓ РїРѕРїРѕР»РЅРµРЅРёСЏ РІ RUB (РѕС‚ {settings.min_topup_rub} РґРѕ {settings.max_topup_rub}).\n"
+            "РџСЂРёРјРµСЂ: 500\n"
+            "Р”Р»СЏ РѕС‚РјРµРЅС‹ РЅР°Р¶РјРёС‚Рµ РєРЅРѕРїРєСѓ РЅРёР¶Рµ."
         ),
         reply_markup=topup_cancel_kb(),
     )
@@ -11137,7 +11378,7 @@ async def topup_handler(message: Message, state: FSMContext):
 async def promo_handler(message: Message):
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Использование: /promo <промокод>")
+        await message.answer("РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ: /promo <РїСЂРѕРјРѕРєРѕРґ>")
         return
     code = parts[1].strip()
     try:
@@ -11151,8 +11392,8 @@ async def promo_handler(message: Message):
     if applied == "pending_topup_discount":
         await message.answer(
             (
-                f"Промокод {result.get('promo_code', code)} принят.\n"
-                f"Скидка {result.get('discount_percent', 0)}% применится к следующему пополнению."
+                f"РџСЂРѕРјРѕРєРѕРґ {result.get('promo_code', code)} РїСЂРёРЅСЏС‚.\n"
+                f"РЎРєРёРґРєР° {result.get('discount_percent', 0)}% РїСЂРёРјРµРЅРёС‚СЃСЏ Рє СЃР»РµРґСѓСЋС‰РµРјСѓ РїРѕРїРѕР»РЅРµРЅРёСЋ."
             )
         )
         return
@@ -11160,9 +11401,9 @@ async def promo_handler(message: Message):
     if applied == PROMO_KIND_BALANCE:
         await message.answer(
             (
-                f"Промокод {result.get('promo_code', code)} применен.\n"
-                f"Начислено: {max(1, int(result.get('value_int', 0)))} RUB\n"
-                f"Баланс: {int(user.get('balance_rub', 0))} RUB"
+                f"РџСЂРѕРјРѕРєРѕРґ {result.get('promo_code', code)} РїСЂРёРјРµРЅРµРЅ.\n"
+                f"РќР°С‡РёСЃР»РµРЅРѕ: {max(1, int(result.get('value_int', 0)))} RUB\n"
+                f"Р‘Р°Р»Р°РЅСЃ: {int(user.get('balance_rub', 0))} RUB"
             )
         )
         return
@@ -11170,14 +11411,14 @@ async def promo_handler(message: Message):
     if applied == PROMO_KIND_SUBSCRIPTION_DAYS:
         await message.answer(
             (
-                f"Промокод {result.get('promo_code', code)} применен.\n"
-                f"Добавлено дней: {max(1, int(result.get('value_int', 0)))}\n"
-                f"Подписка до: {_format_subscription_until(user.get('subscription_until'))}"
+                f"РџСЂРѕРјРѕРєРѕРґ {result.get('promo_code', code)} РїСЂРёРјРµРЅРµРЅ.\n"
+                f"Р”РѕР±Р°РІР»РµРЅРѕ РґРЅРµР№: {max(1, int(result.get('value_int', 0)))}\n"
+                f"РџРѕРґРїРёСЃРєР° РґРѕ: {_format_subscription_until(user.get('subscription_until'))}"
             )
         )
         return
 
-    await message.answer("Промокод применен.")
+    await message.answer("РџСЂРѕРјРѕРєРѕРґ РїСЂРёРјРµРЅРµРЅ.")
 
 
 @router.message(Command("payments"))
@@ -11188,9 +11429,9 @@ async def payments_handler(message: Message):
         await message.answer(str(exc))
         return
     if not items:
-        await message.answer("Платежей пока нет.")
+        await message.answer("РџР»Р°С‚РµР¶РµР№ РїРѕРєР° РЅРµС‚.")
         return
-    lines = ["Последние платежи:"]
+    lines = ["РџРѕСЃР»РµРґРЅРёРµ РїР»Р°С‚РµР¶Рё:"]
     for p in items[:10]:
         lines.append(
             f"Invoice {p['invoice_id']} | {p['status']} | {p['amount_rub']} RUB | "
@@ -11206,7 +11447,7 @@ async def check_command_handler(message: Message, state: FSMContext):
         await perform_payment_check(message, int(parts[1]))
         return
     await state.set_state(PaymentCheckState.waiting_for_invoice_id)
-    await message.answer("Введите ID счета для проверки. Пример: /check 123456")
+    await message.answer("Р’РІРµРґРёС‚Рµ ID СЃС‡РµС‚Р° РґР»СЏ РїСЂРѕРІРµСЂРєРё. РџСЂРёРјРµСЂ: /check 123456")
 
 
 @router.message(Command("renew"))
@@ -11228,7 +11469,7 @@ async def perform_payment_check(message: Message, invoice_id: int, telegram_id: 
     effective_telegram_id = telegram_id
     if effective_telegram_id is None:
         if not message.from_user:
-            await _upsert_message(message, "Не удалось определить пользователя для проверки платежа.")
+            await _upsert_message(message, "РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РґР»СЏ РїСЂРѕРІРµСЂРєРё РїР»Р°С‚РµР¶Р°.")
             return
         effective_telegram_id = message.from_user.id
     try:
@@ -11237,17 +11478,17 @@ async def perform_payment_check(message: Message, invoice_id: int, telegram_id: 
         await _upsert_message(message, str(exc))
         return
     if str(result.get("status", "")).lower() == "paid":
-        await _upsert_message(message, "Баланс успешно пополнен.", reply_markup=main_menu_kb())
+        await _upsert_message(message, "Р‘Р°Р»Р°РЅСЃ СѓСЃРїРµС€РЅРѕ РїРѕРїРѕР»РЅРµРЅ.", reply_markup=main_menu_kb())
         return
     lines = [
         f"Invoice {result['invoice_id']}: {result['status']}",
-        f"Сумма: {result['amount_rub']} RUB",
-        f"К оплате: {result.get('payable_rub', result['amount_rub'])} RUB",
-        f"Промо: {result.get('promo_code') or '-'} ({result.get('promo_discount_percent', 0)}%)",
-        f"Зачислено: {result.get('credited_rub', 0)} RUB",
-        f"Реф. бонус: {result.get('referral_bonus_rub', 0)} RUB",
-        f"Баланс: {result.get('balance_rub', 0)} RUB",
-        f"Подписка до: {_format_subscription_until(result.get('subscription_until'))}",
+        f"РЎСѓРјРјР°: {result['amount_rub']} RUB",
+        f"Рљ РѕРїР»Р°С‚Рµ: {result.get('payable_rub', result['amount_rub'])} RUB",
+        f"РџСЂРѕРјРѕ: {result.get('promo_code') or '-'} ({result.get('promo_discount_percent', 0)}%)",
+        f"Р—Р°С‡РёСЃР»РµРЅРѕ: {result.get('credited_rub', 0)} RUB",
+        f"Р РµС„. Р±РѕРЅСѓСЃ: {result.get('referral_bonus_rub', 0)} RUB",
+        f"Р‘Р°Р»Р°РЅСЃ: {result.get('balance_rub', 0)} RUB",
+        f"РџРѕРґРїРёСЃРєР° РґРѕ: {_format_subscription_until(result.get('subscription_until'))}",
     ]
     await _upsert_message(message, "\n".join(lines), reply_markup=main_menu_kb())
 
@@ -11270,42 +11511,42 @@ async def config_handler(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "welcome:skip")
 async def welcome_skip_callback(callback: CallbackQuery):
-    await callback.answer("Окей, можно активировать бонус через это сообщение.", show_alert=True)
+    await callback.answer("РћРєРµР№, РјРѕР¶РЅРѕ Р°РєС‚РёРІРёСЂРѕРІР°С‚СЊ Р±РѕРЅСѓСЃ С‡РµСЂРµР· СЌС‚Рѕ СЃРѕРѕР±С‰РµРЅРёРµ.", show_alert=True)
 
 
 @router.callback_query(F.data == "welcome:check")
 async def welcome_check_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     subscribed = await _is_user_subscribed_to_welcome_channel(callback.bot, callback.from_user.id)
     if not subscribed:
-        await callback.answer("Подписка не найдена. Подпишись на канал и нажми снова.", show_alert=True)
+        await callback.answer("РџРѕРґРїРёСЃРєР° РЅРµ РЅР°Р№РґРµРЅР°. РџРѕРґРїРёС€РёСЃСЊ РЅР° РєР°РЅР°Р» Рё РЅР°Р¶РјРё СЃРЅРѕРІР°.", show_alert=True)
         return
     try:
         result = await bot_api_client.claim_welcome_bonus(callback.from_user.id)
     except RuntimeError as exc:
         await _upsert_message(callback.message, str(exc), reply_markup=welcome_bonus_kb())
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("РћС€РёР±РєР°", show_alert=True)
         return
     if result.get("claimed"):
         await _upsert_message(
             callback.message,
             (
-                f"Готово. Начислено +{result.get('days_added', 0)} дня.\n"
-                f"Подписка до: {_format_subscription_until(result.get('subscription_until'))}"
+                f"Р“РѕС‚РѕРІРѕ. РќР°С‡РёСЃР»РµРЅРѕ +{result.get('days_added', 0)} РґРЅСЏ.\n"
+                f"РџРѕРґРїРёСЃРєР° РґРѕ: {_format_subscription_until(result.get('subscription_until'))}"
             ),
             reply_markup=main_menu_kb(),
         )
     else:
-        await _upsert_message(callback.message, "Бонус уже был активирован ранее.", reply_markup=main_menu_kb())
-    await callback.answer("Статус проверен")
+        await _upsert_message(callback.message, "Р‘РѕРЅСѓСЃ СѓР¶Рµ Р±С‹Р» Р°РєС‚РёРІРёСЂРѕРІР°РЅ СЂР°РЅРµРµ.", reply_markup=main_menu_kb())
+    await callback.answer("РЎС‚Р°С‚СѓСЃ РїСЂРѕРІРµСЂРµРЅ")
 
 
 @router.callback_query(F.data == "menu:main")
 async def menu_main_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_main_menu(callback.message)
     await callback.answer()
@@ -11314,7 +11555,7 @@ async def menu_main_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "menu:profile")
 async def menu_profile_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_profile_screen(callback.message, callback.from_user.id)
     await callback.answer()
@@ -11323,7 +11564,7 @@ async def menu_profile_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "menu:balance")
 async def menu_balance_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_balance(callback.message, callback.from_user.id)
     await callback.answer()
@@ -11332,7 +11573,7 @@ async def menu_balance_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "menu:servers")
 async def menu_servers_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_servers_screen(callback.message)
     await callback.answer()
@@ -11346,7 +11587,7 @@ async def menu_topup_callback(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "menu:connect")
 async def menu_connect_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_connect_screen(callback.message, callback.from_user.id)
     await callback.answer()
@@ -11355,7 +11596,7 @@ async def menu_connect_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "menu:help")
 async def menu_help_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_help_screen(callback.message)
     await callback.answer()
@@ -11364,7 +11605,7 @@ async def menu_help_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "menu:giveaways")
 async def menu_giveaways_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_giveaways_screen(callback.message)
     await callback.answer()
@@ -11372,19 +11613,19 @@ async def menu_giveaways_callback(callback: CallbackQuery):
 
 @router.callback_query(F.data == "giveaway:joined")
 async def giveaway_joined_callback(callback: CallbackQuery):
-    await callback.answer("Вы уже участвуете")
+    await callback.answer("Р’С‹ СѓР¶Рµ СѓС‡Р°СЃС‚РІСѓРµС‚Рµ")
 
 
 @router.callback_query(F.data.startswith("giveaway:join:"))
 async def giveaway_join_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     raw = str(callback.data or "")
     parts = raw.split(":")
     giveaway_id = int(parts[-1]) if parts and parts[-1].isdigit() else 0
     if giveaway_id <= 0:
-        await callback.answer("Некорректный розыгрыш", show_alert=True)
+        await callback.answer("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ СЂРѕР·С‹РіСЂС‹С€", show_alert=True)
         return
     try:
         await bot_api_client.join_giveaway(callback.from_user.id, giveaway_id)
@@ -11392,13 +11633,13 @@ async def giveaway_join_callback(callback: CallbackQuery):
         await callback.answer(str(exc), show_alert=True)
         return
     await show_giveaways_screen(callback.message)
-    await callback.answer("Вы участвуете")
+    await callback.answer("Р’С‹ СѓС‡Р°СЃС‚РІСѓРµС‚Рµ")
 
 
 @router.callback_query(F.data == "profile:open")
 async def profile_open_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_profile_screen(callback.message, callback.from_user.id)
     await callback.answer()
@@ -11407,7 +11648,7 @@ async def profile_open_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "profile:configs")
 async def profile_configs_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_connect_screen(callback.message, callback.from_user.id)
     await callback.answer()
@@ -11416,13 +11657,13 @@ async def profile_configs_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "profile:ref")
 async def profile_ref_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     try:
         user = await bot_api_client.get_user(callback.from_user.id)
     except RuntimeError as exc:
         await _upsert_message(callback.message, str(exc), reply_markup=profile_kb())
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("РћС€РёР±РєР°", show_alert=True)
         return
     await _upsert_message(
         callback.message,
@@ -11436,7 +11677,7 @@ async def profile_ref_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "profile:sub")
 async def profile_subscription_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_connect_screen(callback.message, callback.from_user.id)
     await callback.answer()
@@ -11445,7 +11686,7 @@ async def profile_subscription_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "profile:limit")
 async def profile_limit_callback(callback: CallbackQuery):
     await callback.answer(
-        f"Лимит подписки: до {MAX_ACTIVE_CONFIGS_PER_USER} устройств.",
+        f"Р›РёРјРёС‚ РїРѕРґРїРёСЃРєРё: РґРѕ {MAX_ACTIVE_CONFIGS_PER_USER} СѓСЃС‚СЂРѕР№СЃС‚РІ.",
         show_alert=True,
     )
 
@@ -11453,7 +11694,7 @@ async def profile_limit_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "profile:create_config")
 async def profile_create_config_callback(callback: CallbackQuery, state: FSMContext):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await state.clear()
     await show_connect_screen(callback.message, callback.from_user.id)
@@ -11466,24 +11707,24 @@ async def profile_copy_config_callback(callback: CallbackQuery):
         return
     parts = callback.data.split(":")
     if len(parts) != 3 or not parts[2].isdigit():
-        await callback.answer("Некорректный ID", show_alert=True)
+        await callback.answer("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ ID", show_alert=True)
         return
     config_id = int(parts[2])
     try:
         user = await bot_api_client.get_user(callback.from_user.id)
     except RuntimeError as exc:
         await _upsert_message(callback.message, str(exc), reply_markup=profile_kb())
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("РћС€РёР±РєР°", show_alert=True)
         return
     cfg = next((item for item in list(user.get("configs") or []) if int(item.get("id", 0)) == config_id), None)
     if not cfg:
-        await callback.answer("Конфиг не найден", show_alert=True)
+        await callback.answer("РљРѕРЅС„РёРі РЅРµ РЅР°Р№РґРµРЅ", show_alert=True)
         return
     if not cfg.get("is_active"):
-        await callback.answer("Конфиг неактивен", show_alert=True)
+        await callback.answer("РљРѕРЅС„РёРі РЅРµР°РєС‚РёРІРµРЅ", show_alert=True)
         return
     await send_copyable_vless(callback.message, str(cfg.get("vless_url", "")))
-    await callback.answer("Ссылка отправлена")
+    await callback.answer("РЎСЃС‹Р»РєР° РѕС‚РїСЂР°РІР»РµРЅР°")
 
 
 @router.callback_query(F.data.startswith("profile:cfgdel:"))
@@ -11492,17 +11733,17 @@ async def profile_delete_config_callback(callback: CallbackQuery):
         return
     parts = callback.data.split(":")
     if len(parts) != 3 or not parts[2].isdigit():
-        await callback.answer("Некорректный ID", show_alert=True)
+        await callback.answer("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ ID", show_alert=True)
         return
     config_id = int(parts[2])
     try:
         result = await bot_api_client.revoke(callback.from_user.id, config_id)
     except RuntimeError as exc:
         await _upsert_message(callback.message, str(exc), reply_markup=profile_kb())
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("РћС€РёР±РєР°", show_alert=True)
         return
     await show_configs_screen(callback.message, callback.from_user.id)
-    await callback.answer(f"Конфиг #{result['config_id']} удален")
+    await callback.answer(f"РљРѕРЅС„РёРі #{result['config_id']} СѓРґР°Р»РµРЅ")
 
 
 @router.callback_query(F.data == "topup:start")
@@ -11511,8 +11752,8 @@ async def topup_start_callback(callback: CallbackQuery, state: FSMContext):
     if callback.message:
         await _upsert_message(
             callback.message,
-            f"Введите сумму пополнения в RUB (от {settings.min_topup_rub} до {settings.max_topup_rub}). "
-            "Далее выберешь способ оплаты.",
+            f"Р’РІРµРґРёС‚Рµ СЃСѓРјРјСѓ РїРѕРїРѕР»РЅРµРЅРёСЏ РІ RUB (РѕС‚ {settings.min_topup_rub} РґРѕ {settings.max_topup_rub}). "
+            "Р”Р°Р»РµРµ РІС‹Р±РµСЂРµС€СЊ СЃРїРѕСЃРѕР± РѕРїР»Р°С‚С‹.",
             reply_markup=topup_cancel_kb(),
         )
     await callback.answer()
@@ -11524,10 +11765,10 @@ async def topup_cancel_callback(callback: CallbackQuery, state: FSMContext):
     if callback.message:
         await _upsert_message(
             callback.message,
-            "Пополнение отменено.",
+            "РџРѕРїРѕР»РЅРµРЅРёРµ РѕС‚РјРµРЅРµРЅРѕ.",
             reply_markup=main_menu_kb(),
         )
-    await callback.answer("Отменено")
+    await callback.answer("РћС‚РјРµРЅРµРЅРѕ")
 
 
 @router.callback_query(F.data.startswith("topup:gateway:"))
@@ -11536,27 +11777,27 @@ async def topup_gateway_callback(callback: CallbackQuery):
         return
     parts = callback.data.split(":")
     if len(parts) != 4:
-        await callback.answer("Неверный формат", show_alert=True)
+        await callback.answer("РќРµРІРµСЂРЅС‹Р№ С„РѕСЂРјР°С‚", show_alert=True)
         return
     _, _, gateway, amount_raw = parts
     if not amount_raw.isdigit():
-        await callback.answer("Неверная сумма", show_alert=True)
+        await callback.answer("РќРµРІРµСЂРЅР°СЏ СЃСѓРјРјР°", show_alert=True)
         return
     amount_rub = int(amount_raw)
     try:
         invoice = await bot_api_client.create_payment(callback.from_user.id, amount_rub, gateway=gateway)
     except RuntimeError as exc:
         await _upsert_message(callback.message, str(exc), reply_markup=topup_cancel_kb())
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("РћС€РёР±РєР°", show_alert=True)
         return
     await send_payment_created(callback.message, invoice)
-    await callback.answer("Счет создан")
+    await callback.answer("РЎС‡РµС‚ СЃРѕР·РґР°РЅ")
 
 
 @router.callback_query(F.data == "balance:renew")
 async def renew_from_balance_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await show_renew_menu(callback.message, callback.from_user.id)
     await callback.answer()
@@ -11565,19 +11806,19 @@ async def renew_from_balance_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("renew:plan:"))
 async def renew_plan_callback(callback: CallbackQuery):
     if not callback.message or not callback.data:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     parts = callback.data.split(":")
     plan_id = parts[-1] if parts else ""
     plan = subscription_plan_by_id(plan_id)
     if not plan:
-        await callback.answer("План не найден", show_alert=True)
+        await callback.answer("РџР»Р°РЅ РЅРµ РЅР°Р№РґРµРЅ", show_alert=True)
         return
     try:
         user = await bot_api_client.get_user(callback.from_user.id)
     except RuntimeError as exc:
         await _upsert_message(callback.message, str(exc), reply_markup=balance_kb())
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("РћС€РёР±РєР°", show_alert=True)
         return
     balance = int(user.get("balance_rub", 0))
     price = _plan_price_rub(plan)
@@ -11589,28 +11830,28 @@ async def renew_plan_callback(callback: CallbackQuery):
             _build_insufficient_balance_text(plan, balance),
             reply_markup=choose_gateway_kb(suggested_topup),
         )
-        await callback.answer("Не хватает средств", show_alert=True)
+        await callback.answer("РќРµ С…РІР°С‚Р°РµС‚ СЃСЂРµРґСЃС‚РІ", show_alert=True)
         return
     try:
         result = await bot_api_client.purchase_plan(callback.from_user.id, str(plan.get("id", "")))
     except RuntimeError as exc:
         await _upsert_message(callback.message, str(exc), reply_markup=renew_menu_kb())
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("РћС€РёР±РєР°", show_alert=True)
         return
     await _upsert_message(
         callback.message,
         "\n".join(
             [
-                "✅ Подписка продлена!",
-                f"План: {_plan_months_label(plan)}",
-                f"Списано: {int(result.get('charged_rub', price))} RUB",
-                f"Остаток баланса: {int(result.get('balance_rub', 0))} RUB",
-                f"Новая дата: {_format_subscription_until(result.get('subscription_until'))}",
+                "вњ… РџРѕРґРїРёСЃРєР° РїСЂРѕРґР»РµРЅР°!",
+                f"РџР»Р°РЅ: {_plan_months_label(plan)}",
+                f"РЎРїРёСЃР°РЅРѕ: {int(result.get('charged_rub', price))} RUB",
+                f"РћСЃС‚Р°С‚РѕРє Р±Р°Р»Р°РЅСЃР°: {int(result.get('balance_rub', 0))} RUB",
+                f"РќРѕРІР°СЏ РґР°С‚Р°: {_format_subscription_until(result.get('subscription_until'))}",
             ]
         ),
         reply_markup=balance_kb(),
     )
-    await callback.answer("Готово")
+    await callback.answer("Р“РѕС‚РѕРІРѕ")
 
 
 @router.callback_query(F.data.startswith("paycheck:"))
@@ -11620,10 +11861,10 @@ async def payment_check_callback(callback: CallbackQuery):
     invoice_id = int(callback.data.split(":")[1])
     fake_message = callback.message
     if fake_message is None:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await perform_payment_check(fake_message, invoice_id, telegram_id=callback.from_user.id)
-    await callback.answer("Статус обновлен")
+    await callback.answer("РЎС‚Р°С‚СѓСЃ РѕР±РЅРѕРІР»РµРЅ")
 
 
 @router.callback_query(F.data == "sub:howto")
@@ -11636,16 +11877,16 @@ async def sub_howto_callback(callback: CallbackQuery):
             callback.message,
             "\n".join(
                 [
-                    "Как подключиться к VPN:",
+                    "РљР°Рє РїРѕРґРєР»СЋС‡РёС‚СЊСЃСЏ Рє VPN:",
                     "",
-                    "1. Нажмите «Подключить» и получите ссылку Subscription URL.",
-                    "2. Откройте VPN-клиент с поддержкой подписок (HApp, Hiddify, v2rayNG и аналоги).",
-                    "3. Добавьте URL в разделе Profiles/Subscriptions.",
-                    "4. Нажмите Update/Import и включите VPN.",
+                    "1. РќР°Р¶РјРёС‚Рµ В«РџРѕРґРєР»СЋС‡РёС‚СЊВ» Рё РїРѕР»СѓС‡РёС‚Рµ СЃСЃС‹Р»РєСѓ Subscription URL.",
+                    "2. РћС‚РєСЂРѕР№С‚Рµ VPN-РєР»РёРµРЅС‚ СЃ РїРѕРґРґРµСЂР¶РєРѕР№ РїРѕРґРїРёСЃРѕРє (HApp, Hiddify, v2rayNG Рё Р°РЅР°Р»РѕРіРё).",
+                    "3. Р”РѕР±Р°РІСЊС‚Рµ URL РІ СЂР°Р·РґРµР»Рµ Profiles/Subscriptions.",
+                    "4. РќР°Р¶РјРёС‚Рµ Update/Import Рё РІРєР»СЋС‡РёС‚Рµ VPN.",
                     "",
-                    f"Лимит: до {MAX_ACTIVE_CONFIGS_PER_USER} устройств на подписку.",
-                    "Для HApp можно использовать кнопку «Добавить в HApp».",
-                    f"Скачать HApp: {happ_download_url}",
+                    f"Р›РёРјРёС‚: РґРѕ {MAX_ACTIVE_CONFIGS_PER_USER} СѓСЃС‚СЂРѕР№СЃС‚РІ РЅР° РїРѕРґРїРёСЃРєСѓ.",
+                    "Р”Р»СЏ HApp РјРѕР¶РЅРѕ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ РєРЅРѕРїРєСѓ В«Р”РѕР±Р°РІРёС‚СЊ РІ HAppВ».",
+                    f"РЎРєР°С‡Р°С‚СЊ HApp: {happ_download_url}",
                 ]
             ),
             reply_markup=subscription_link_kb(callback.from_user.id),
@@ -11674,31 +11915,31 @@ async def sub_happ_callback(callback: CallbackQuery):
         await _upsert_message(
             callback.message,
             (
-                "Открытие HApp из Telegram-кнопки ограничено на некоторых клиентах.\n\n"
-                "Скопируйте ссылку ниже и откройте в системе/браузере:\n"
+                "РћС‚РєСЂС‹С‚РёРµ HApp РёР· Telegram-РєРЅРѕРїРєРё РѕРіСЂР°РЅРёС‡РµРЅРѕ РЅР° РЅРµРєРѕС‚РѕСЂС‹С… РєР»РёРµРЅС‚Р°С….\n\n"
+                "РЎРєРѕРїРёСЂСѓР№С‚Рµ СЃСЃС‹Р»РєСѓ РЅРёР¶Рµ Рё РѕС‚РєСЂРѕР№С‚Рµ РІ СЃРёСЃС‚РµРјРµ/Р±СЂР°СѓР·РµСЂРµ:\n"
                 f"<code>{escape(happ_url)}</code>\n\n"
-                "Если не сработает, откройте HApp вручную и вставьте ссылку подписки для авто-добавления устройства:\n"
+                "Р•СЃР»Рё РЅРµ СЃСЂР°Р±РѕС‚Р°РµС‚, РѕС‚РєСЂРѕР№С‚Рµ HApp РІСЂСѓС‡РЅСѓСЋ Рё РІСЃС‚Р°РІСЊС‚Рµ СЃСЃС‹Р»РєСѓ РїРѕРґРїРёСЃРєРё РґР»СЏ Р°РІС‚Рѕ-РґРѕР±Р°РІР»РµРЅРёСЏ СѓСЃС‚СЂРѕР№СЃС‚РІР°:\n"
                 f"<code>{escape(happ_sub_url)}</code>\n\n"
-                "Обычная ссылка подписки (без авто-метки устройства):\n"
+                "РћР±С‹С‡РЅР°СЏ СЃСЃС‹Р»РєР° РїРѕРґРїРёСЃРєРё (Р±РµР· Р°РІС‚Рѕ-РјРµС‚РєРё СѓСЃС‚СЂРѕР№СЃС‚РІР°):\n"
                 f"<code>{escape(sub_url)}</code>\n\n"
-                f"Скачать HApp: {escape(happ_download_url)}"
+                f"РЎРєР°С‡Р°С‚СЊ HApp: {escape(happ_download_url)}"
             ),
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=subscription_link_kb(callback.from_user.id),
         )
-    await callback.answer("Инструкция отправлена")
+    await callback.answer("РРЅСЃС‚СЂСѓРєС†РёСЏ РѕС‚РїСЂР°РІР»РµРЅР°")
 
 
 @router.callback_query(F.data.startswith("issue:"))
 async def choose_server_handler(callback: CallbackQuery, state: FSMContext):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await state.clear()
     await _upsert_message(
         callback.message,
-        "Ручная выдача конфигов отключена. Используйте кнопку «Подключить».",
+        "Р СѓС‡РЅР°СЏ РІС‹РґР°С‡Р° РєРѕРЅС„РёРіРѕРІ РѕС‚РєР»СЋС‡РµРЅР°. РСЃРїРѕР»СЊР·СѓР№С‚Рµ РєРЅРѕРїРєСѓ В«РџРѕРґРєР»СЋС‡РёС‚СЊВ».",
         reply_markup=servers_overview_kb(),
     )
     await callback.answer()
@@ -11707,21 +11948,21 @@ async def choose_server_handler(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "connect:buy")
 async def connect_buy_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     amount_rub = max(1, int(settings.subscription_price_rub))
     await _upsert_message(
         callback.message,
-        f"Выберите способ оплаты для подключения: {amount_rub} RUB.",
+        f"Р’С‹Р±РµСЂРёС‚Рµ СЃРїРѕСЃРѕР± РѕРїР»Р°С‚С‹ РґР»СЏ РїРѕРґРєР»СЋС‡РµРЅРёСЏ: {amount_rub} RUB.",
         reply_markup=choose_gateway_kb(amount_rub),
     )
-    await callback.answer("Способы оплаты открыты")
+    await callback.answer("РЎРїРѕСЃРѕР±С‹ РѕРїР»Р°С‚С‹ РѕС‚РєСЂС‹С‚С‹")
 
 
 @router.callback_query(F.data == "connect:sub")
 async def connect_subscription_link_callback(callback: CallbackQuery):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await send_subscription_link(callback.message, callback.from_user.id)
     await callback.answer()
@@ -11730,7 +11971,7 @@ async def connect_subscription_link_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "connect:devices")
 async def connect_devices_callback(callback: CallbackQuery, state: FSMContext):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await state.clear()
     await show_connect_devices_screen(callback.message, callback.from_user.id)
@@ -11743,22 +11984,22 @@ async def connect_device_show_callback(callback: CallbackQuery):
         return
     parts = callback.data.split(":")
     if len(parts) != 3 or not parts[2].isdigit():
-        await callback.answer("Некорректный ID", show_alert=True)
+        await callback.answer("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ ID", show_alert=True)
         return
     config_id = int(parts[2])
     try:
         user = await bot_api_client.get_user(callback.from_user.id)
     except RuntimeError as exc:
         await _upsert_message(callback.message, str(exc), reply_markup=connect_active_kb())
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("РћС€РёР±РєР°", show_alert=True)
         return
     cfg = next((item for item in list(user.get("configs") or []) if int(item.get("id", 0)) == config_id), None)
     if not cfg or not cfg.get("is_active"):
-        await callback.answer("Устройство не найдено", show_alert=True)
+        await callback.answer("РЈСЃС‚СЂРѕР№СЃС‚РІРѕ РЅРµ РЅР°Р№РґРµРЅРѕ", show_alert=True)
         return
     device_name = str(cfg.get("device_name") or "").strip() or "device"
     await send_device_subscription_link(callback.message, callback.from_user.id, device_name)
-    await callback.answer("Subscription URL отправлен")
+    await callback.answer("Subscription URL РѕС‚РїСЂР°РІР»РµРЅ")
 
 
 @router.callback_query(F.data.startswith("connect:devdel:"))
@@ -11767,43 +12008,43 @@ async def connect_device_delete_callback(callback: CallbackQuery):
         return
     parts = callback.data.split(":")
     if len(parts) != 3 or not parts[2].isdigit():
-        await callback.answer("Некорректный ID", show_alert=True)
+        await callback.answer("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ ID", show_alert=True)
         return
     config_id = int(parts[2])
     try:
         result = await bot_api_client.revoke(callback.from_user.id, config_id)
     except RuntimeError as exc:
         await _upsert_message(callback.message, str(exc), reply_markup=main_menu_kb())
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("РћС€РёР±РєР°", show_alert=True)
         return
     await show_connect_devices_screen(callback.message, callback.from_user.id)
-    await callback.answer(f"Устройство #{result['config_id']} отключено")
+    await callback.answer(f"РЈСЃС‚СЂРѕР№СЃС‚РІРѕ #{result['config_id']} РѕС‚РєР»СЋС‡РµРЅРѕ")
 
 
 @router.callback_query(F.data == "connect:devadd")
 async def connect_device_add_callback(callback: CallbackQuery, state: FSMContext):
     if not callback.message:
-        await callback.answer("Нет контекста сообщения", show_alert=True)
+        await callback.answer("РќРµС‚ РєРѕРЅС‚РµРєСЃС‚Р° СЃРѕРѕР±С‰РµРЅРёСЏ", show_alert=True)
         return
     await state.clear()
     await _upsert_message(
         callback.message,
-        "Добавление устройств вручную отключено. Используйте общую ссылку подписки.",
+        "Р”РѕР±Р°РІР»РµРЅРёРµ СѓСЃС‚СЂРѕР№СЃС‚РІ РІСЂСѓС‡РЅСѓСЋ РѕС‚РєР»СЋС‡РµРЅРѕ. РСЃРїРѕР»СЊР·СѓР№С‚Рµ РѕР±С‰СѓСЋ СЃСЃС‹Р»РєСѓ РїРѕРґРїРёСЃРєРё.",
         reply_markup=connect_active_kb(),
     )
-    await callback.answer("Добавление отключено", show_alert=True)
+    await callback.answer("Р”РѕР±Р°РІР»РµРЅРёРµ РѕС‚РєР»СЋС‡РµРЅРѕ", show_alert=True)
 
 
 @router.message(IssueConfigState.waiting_for_device_name)
 async def issue_with_device(message: Message, state: FSMContext):
     if not message.from_user:
         await state.clear()
-        await _upsert_message(message, "Не удалось определить пользователя.", reply_markup=main_menu_kb())
+        await _upsert_message(message, "РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ.", reply_markup=main_menu_kb())
         return
     await state.clear()
     await _upsert_message(
         message,
-        "Добавление устройств вручную отключено. Используйте общую ссылку подписки.",
+        "Р”РѕР±Р°РІР»РµРЅРёРµ СѓСЃС‚СЂРѕР№СЃС‚РІ РІСЂСѓС‡РЅСѓСЋ РѕС‚РєР»СЋС‡РµРЅРѕ. РСЃРїРѕР»СЊР·СѓР№С‚Рµ РѕР±С‰СѓСЋ СЃСЃС‹Р»РєСѓ РїРѕРґРїРёСЃРєРё.",
         reply_markup=connect_active_kb(),
     )
     return
@@ -11813,7 +12054,7 @@ async def issue_with_device(message: Message, state: FSMContext):
 async def payment_check_state_handler(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     if not text.isdigit():
-        await message.answer("Нужно указать числовой ID счета.")
+        await message.answer("РќСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ С‡РёСЃР»РѕРІРѕР№ ID СЃС‡РµС‚Р°.")
         return
     await state.clear()
     await perform_payment_check(message, int(text))
@@ -11822,21 +12063,21 @@ async def payment_check_state_handler(message: Message, state: FSMContext):
 @router.message(PaymentAmountState.waiting_for_amount_rub)
 async def payment_amount_state_handler(message: Message, state: FSMContext):
     raw_text = (message.text or "").strip()
-    if raw_text.lower() in {"отмена", "cancel", "/cancel"}:
+    if raw_text.lower() in {"РѕС‚РјРµРЅР°", "cancel", "/cancel"}:
         await state.clear()
-        await message.answer("Пополнение отменено.")
+        await message.answer("РџРѕРїРѕР»РЅРµРЅРёРµ РѕС‚РјРµРЅРµРЅРѕ.")
         return
     text = raw_text.replace(",", ".")
     if not text.isdigit():
         await message.answer(
-            "Нужно ввести целую сумму в RUB или написать 'отмена'.",
+            "РќСѓР¶РЅРѕ РІРІРµСЃС‚Рё С†РµР»СѓСЋ СЃСѓРјРјСѓ РІ RUB РёР»Рё РЅР°РїРёСЃР°С‚СЊ 'РѕС‚РјРµРЅР°'.",
             reply_markup=topup_cancel_kb(),
         )
         return
     amount_rub = int(text)
     await state.clear()
     await message.answer(
-        f"Выбери способ оплаты для {amount_rub} RUB:",
+        f"Р’С‹Р±РµСЂРё СЃРїРѕСЃРѕР± РѕРїР»Р°С‚С‹ РґР»СЏ {amount_rub} RUB:",
         reply_markup=choose_gateway_kb(amount_rub),
     )
 
@@ -11845,14 +12086,14 @@ async def payment_amount_state_handler(message: Message, state: FSMContext):
 async def revoke_handler(message: Message):
     parts = (message.text or "").split()
     if len(parts) != 2 or not parts[1].isdigit():
-        await message.answer("Использование: /revoke <config_id>")
+        await message.answer("РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ: /revoke <config_id>")
         return
     try:
         result = await bot_api_client.revoke(message.from_user.id, int(parts[1]))
     except RuntimeError as exc:
         await message.answer(str(exc))
         return
-    await message.answer(f"Конфиг #{result['config_id']} отозван.")
+    await message.answer(f"РљРѕРЅС„РёРі #{result['config_id']} РѕС‚РѕР·РІР°РЅ.")
 
 
 async def run_bot():

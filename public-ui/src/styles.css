@@ -674,3 +674,140 @@ h2 {
     justify-content: flex-start;
   }
 }
+
+/* Cabinet */
+.cabinet-page {
+  width: min(1180px, 100%);
+}
+
+.cabinet-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.cabinet-login-card {
+  margin-top: 12px;
+}
+
+.tg-login-slot {
+  margin-top: 10px;
+}
+
+.cabinet-inline-form {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 1.4fr 1fr auto;
+  gap: 8px;
+}
+
+.plan-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.plan-card {
+  border: 1px solid rgba(132, 185, 255, 0.22);
+  border-radius: 14px;
+  background: rgba(10, 24, 43, 0.64);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+@media (max-width: 980px) {
+  .cabinet-head {
+    flex-direction: column;
+  }
+
+  .plan-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .cabinet-inline-form {
+    grid-template-columns: 1fr;
+  }
+
+  .plan-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Shared controls for cabinet */
+.control-input,
+.control-select {
+  width: 100%;
+  border: 1px solid rgba(132, 185, 255, 0.32);
+  background: rgba(8, 20, 38, 0.84);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.control-input:focus,
+.control-select:focus {
+  outline: none;
+  border-color: rgba(95, 170, 255, 0.7);
+  box-shadow: 0 0 0 3px rgba(95, 170, 255, 0.18);
+}
+
+.success-banner,
+.error-banner {
+  margin-top: 12px;
+  border-radius: 12px;
+  padding: 10px 12px;
+  border: 1px solid;
+}
+
+.success-banner {
+  border-color: rgba(47, 231, 162, 0.4);
+  background: rgba(18, 80, 58, 0.4);
+  color: #d8ffef;
+}
+
+.error-banner {
+  border-color: rgba(255, 126, 143, 0.45);
+  background: rgba(102, 29, 45, 0.45);
+  color: #ffd8de;
+}
+
+.table-shell {
+  margin-top: 10px;
+  overflow: auto;
+  border: 1px solid rgba(132, 185, 255, 0.22);
+  border-radius: 12px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(132, 185, 255, 0.16);
+  text-align: left;
+  font-size: 13px;
+}
+
+.data-table thead th {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #9fc2ef;
+  background: rgba(12, 30, 54, 0.78);
+}
+
+.empty-banner {
+  color: var(--muted);
+  padding: 12px;
+}
