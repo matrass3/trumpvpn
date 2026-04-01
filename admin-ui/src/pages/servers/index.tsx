@@ -16,7 +16,6 @@ export function ServersPage() {
   const [defaults, setDefaults] = useState<Record<string, string | number | boolean>>({});
   const [query, setQuery] = useState("");
   const [health, setHealth] = useState("all");
-  const [autoRefresh, setAutoRefresh] = useState(true);
 
   const [vlessForm, setVlessForm] = useState({
     name: "",
@@ -59,7 +58,7 @@ export function ServersPage() {
   const load = useCallback(async () => {
     setPending(true);
     try {
-      const response = await getAdminServers({ live: 1 });
+      const response = await getAdminServers({ live: 0 });
       setItems(response.servers || []);
       setDefaults(response.defaults || {});
       setVlessForm((prev) => ({
@@ -89,15 +88,6 @@ export function ServersPage() {
     void load();
   }, [load]);
 
-  useEffect(() => {
-    if (!autoRefresh) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      void load();
-    }, 12000);
-    return () => window.clearInterval(timer);
-  }, [autoRefresh, load]);
 
   async function runAction(path: string, body: Record<string, string | number | boolean> = {}) {
     const result = await submitAdminActionSafely(path, body);
@@ -135,10 +125,6 @@ export function ServersPage() {
           <button className="btn btn-secondary" type="button" onClick={() => void load()} disabled={pending}>
             {pending ? "Loading..." : "Refresh"}
           </button>
-          <label className="toggle-field">
-            <input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
-            <span>Auto refresh (12s)</span>
-          </label>
         </div>
       }
     >

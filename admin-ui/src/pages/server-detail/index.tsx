@@ -8,7 +8,6 @@ import {
 import { submitAdminActionSafely } from "../../shared/api/adminAction";
 import { isUnauthorizedError } from "../../shared/api/httpClient";
 import { ROUTES } from "../../shared/config/routes";
-import { ADMIN_AUTO_REFRESH_MS, ADMIN_AUTO_REFRESH_SECONDS } from "../../shared/config/polling";
 import { useFlash } from "../../shared/hooks/useFlash";
 import { PageSection } from "../../shared/ui/PageSection";
 import { LineChart } from "../../shared/ui/LineChart";
@@ -38,7 +37,6 @@ export function ServerDetailPage() {
 
   const [pending, setPending] = useState(false);
   const [checkPending, setCheckPending] = useState(false);
-  const [autoRefresh, setAutoRefresh] = useState(false);
   const [detail, setDetail] = useState<AdminServerDetail | null>(null);
 
   const server = detail?.server ?? null;
@@ -53,7 +51,7 @@ export function ServerDetailPage() {
       }
       setPending(true);
       try {
-        const snapshot = await getAdminServerDetail(serverId, { live: 1, fresh: fresh ? 1 : 0 });
+        const snapshot = await getAdminServerDetail(serverId, { live: 0, fresh: fresh ? 1 : 0 });
         setDetail(snapshot);
       } catch (error) {
         if (isUnauthorizedError(error)) {
@@ -72,15 +70,6 @@ export function ServerDetailPage() {
     void load();
   }, [load]);
 
-  useEffect(() => {
-    if (!autoRefresh) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      void load();
-    }, ADMIN_AUTO_REFRESH_MS);
-    return () => window.clearInterval(timer);
-  }, [autoRefresh, load]);
 
   const patchServer = useCallback(
     <K extends keyof AdminServerDetail["server"]>(key: K, value: AdminServerDetail["server"][K]) => {
@@ -199,10 +188,6 @@ export function ServerDetailPage() {
           <button className="btn btn-secondary" type="button" onClick={onRuntimeCheck} disabled={checkPending || pending}>
             {checkPending ? "Checking..." : "Check runtime"}
           </button>
-          <label className="toggle-field">
-            <input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
-            <span>{`Auto refresh (${ADMIN_AUTO_REFRESH_SECONDS}s)`}</span>
-          </label>
         </div>
       }
     >

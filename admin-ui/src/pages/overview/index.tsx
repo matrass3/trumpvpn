@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+﻿import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useOverviewSnapshot } from "../../features/overview/model/useOverviewSnapshot";
 import { OverviewKpiGrid } from "../../features/overview/ui/OverviewKpiGrid";
@@ -17,18 +17,6 @@ export function OverviewPage() {
   const { snapshot, pending, error, refresh } = useOverviewSnapshot({
     onUnauthorized: () => navigate(ROUTES.login, { replace: true }),
   });
-  const [autoRefresh, setAutoRefresh] = useState(true);
-
-  useEffect(() => {
-    if (!autoRefresh) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      refresh();
-    }, 12000);
-    return () => window.clearInterval(timer);
-  }, [autoRefresh, refresh]);
-
   const quickActions = useMemo(
     () => [
       { title: "Manage Users", desc: "Users, subscriptions, devices, blocks.", to: ROUTES.users },
@@ -54,14 +42,6 @@ export function OverviewPage() {
           <button className="btn btn-secondary" type="button" onClick={refresh} disabled={pending}>
             {pending ? "Syncing..." : "Refresh now"}
           </button>
-          <label className="toggle-field">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(event) => setAutoRefresh(event.target.checked)}
-            />
-            <span>Auto refresh (12s)</span>
-          </label>
         </div>
       }
     >
@@ -332,3 +312,5 @@ export function OverviewPage() {
     </PageSection>
   );
 }
+
+

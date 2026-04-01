@@ -2710,6 +2710,7 @@ def _public_subscription_page_url(request: Request, telegram_id: int, token: str
     params: dict[str, str] = {k: str(v) for k, v in request.query_params.items()}
     params.pop("preview", None)
     params.pop("fmt", None)
+    params.pop("with_stats", None)
     if not params:
         return base
     return f"{base}?{urlencode(params)}"
@@ -2735,7 +2736,7 @@ def _prepare_user_subscription_data(
     token: str,
     request: Request,
     fmt: str = "b64",
-    with_stats: int = 1,
+    with_stats: int = 0,
 ) -> SubscriptionPreparedData:
     if telegram_id <= 0 or not verify_user_subscription_token(telegram_id, token):
         raise HTTPException(status_code=404, detail="Subscription not found")
@@ -2834,13 +2835,13 @@ def _build_subscription_preview_payload(request: Request, prepared: Subscription
     user = prepared.user
     active_configs = prepared.active_configs
 
-    subscription_url = _subscription_variant_url(request, telegram_id, token, fmt=None, preview="1")
-    raw_url = _subscription_variant_url(request, telegram_id, token, fmt="raw", preview="0")
-    b64_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0")
+    subscription_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0", with_stats=None)
+    raw_url = _subscription_variant_url(request, telegram_id, token, fmt="raw", preview="0", with_stats=None)
+    b64_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0", with_stats=None)
     stats_url = _public_subscription_page_url(request, telegram_id, token)
 
     happ_import_url = ""
-    happ_payload_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0")
+    happ_payload_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0", with_stats=None)
     try:
         happ_import_url = str(settings.happ_import_url_template or "").format(
             url=quote(happ_payload_url, safe=""),
@@ -2924,7 +2925,7 @@ def public_subscription_preview_api(
     token: str,
     request: Request,
     fmt: str = "b64",
-    with_stats: int = 1,
+    with_stats: int = 0,
     db: Session = Depends(get_db),
 ):
     prepared = _prepare_user_subscription_data(
@@ -2949,7 +2950,7 @@ def user_subscription(
     token: str,
     request: Request,
     fmt: str = "b64",
-    with_stats: int = 1,
+    with_stats: int = 0,
     db: Session = Depends(get_db),
 ):
     prepared = _prepare_user_subscription_data(
@@ -8402,7 +8403,13 @@ def admin_audit_page(request: Request, msg: str = "", error: str = "", db: Sessi
 def admin_overview_api(request: Request, db: Session = Depends(get_db)):
     if not require_admin_session(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    return _build_admin_snapshot_cached(db, include_runtime_checks=True)
+    live = int(request.query_params.get("live") or 0)
+    fresh = int(request.query_params.get("fresh") or 0)
+    return _build_admin_snapshot_cached(
+        db,
+        include_runtime_checks=bool(live),
+        force_refresh=bool(fresh),
+    )
 
 
 @app.get("/admin/api/server/{server_id}/check")
