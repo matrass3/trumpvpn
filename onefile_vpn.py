@@ -2722,6 +2722,7 @@ def _fmt_notify_dt(value: datetime | None) -> str:
 
 
 def _send_telegram_message(chat_id: int, text: str) -> None:
+    text = _fix_mojibake_text(text)
     token = str(settings.bot_token or "").strip()
     if not token or not chat_id:
         return
@@ -10760,6 +10761,67 @@ def _user_ref_link(telegram_id: int) -> str:
 
 def _is_message_not_modified_error(exc: Exception) -> bool:
     return "message is not modified" in str(exc).lower()
+
+
+def _fix_mojibake_text(value: str | None) -> str:
+    text = str(value or "")
+    if not text:
+        return text
+    markers = ("??", "??", "??", "??", "??", "??", "??", "??", "??", "??")
+    if not any(marker in text for marker in markers):
+        return text
+    try:
+        fixed = text.encode("cp1251").decode("utf-8")
+    except Exception:
+        return text
+    return fixed if fixed else text
+
+
+def _normalize_reply_markup(markup: Any) -> Any:
+    if not markup:
+        return markup
+    try:
+        rows = getattr(markup, "inline_keyboard", None)
+        if rows:
+            for row in rows:
+                for btn in row:
+                    if hasattr(btn, "text") and isinstance(btn.text, str):
+                        btn.text = _fix_mojibake_text(btn.text)
+        rows2 = getattr(markup, "keyboard", None)
+        if rows2:
+            for row in rows2:
+                for btn in row:
+                    if hasattr(btn, "text") and isinstance(btn.text, str):
+                        btn.text = _fix_mojibake_text(btn.text)
+    except Exception:
+        return markup
+    return markup
+
+
+if not getattr(Message, "_tvpn_mojibake_patch", False):
+    _orig_message_answer = Message.answer
+    _orig_message_edit_text = Message.edit_text
+    _orig_message_answer_photo = Message.answer_photo
+
+    async def _patched_message_answer(self, text: str, *args, **kwargs):
+        kwargs["reply_markup"] = _normalize_reply_markup(kwargs.get("reply_markup"))
+        return await _orig_message_answer(self, _fix_mojibake_text(text), *args, **kwargs)
+
+    async def _patched_message_edit_text(self, text: str, *args, **kwargs):
+        kwargs["reply_markup"] = _normalize_reply_markup(kwargs.get("reply_markup"))
+        return await _orig_message_edit_text(self, _fix_mojibake_text(text), *args, **kwargs)
+
+    async def _patched_message_answer_photo(self, photo, *args, **kwargs):
+        kwargs["reply_markup"] = _normalize_reply_markup(kwargs.get("reply_markup"))
+        caption = kwargs.get("caption")
+        if isinstance(caption, str):
+            kwargs["caption"] = _fix_mojibake_text(caption)
+        return await _orig_message_answer_photo(self, photo, *args, **kwargs)
+
+    Message.answer = _patched_message_answer
+    Message.edit_text = _patched_message_edit_text
+    Message.answer_photo = _patched_message_answer_photo
+    Message._tvpn_mojibake_patch = True
 
 
 async def _remove_legacy_keyboard(message: Message) -> None:
