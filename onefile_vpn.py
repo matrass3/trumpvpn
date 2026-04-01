@@ -10425,14 +10425,13 @@ router = Router()
 bot_api_client = APIClient(base_url=settings.api_base_url, internal_token=settings.internal_api_token)
 BOT_USERNAME = ""
 
-BTN_PROFILE = "рџ‘¤ РџСЂРѕС„РёР»СЊ"
-BTN_CONNECT = "вљЎ РџРѕРґРєР»СЋС‡РёС‚СЊ"
-BTN_SERVERS = "рџЊђ РЎРµСЂРІРµСЂС‹"
-BTN_BALANCE = "рџ’і Р‘Р°Р»Р°РЅСЃ"
-BTN_TOPUP = "рџ’і РџРѕРїРѕР»РЅРёС‚СЊ"
-BTN_GIVEAWAY = "рџЋЃ Р РѕР·С‹РіСЂС‹С€"
-BTN_HELP = "рџ† РџРѕРјРѕС‰СЊ"
-
+BTN_PROFILE = "👤 Профиль"
+BTN_CONNECT = "⚡ Подключить"
+BTN_SERVERS = "🗂 Серверы"
+BTN_BALANCE = "💳 Баланс"
+BTN_TOPUP = "💰 Пополнить"
+BTN_GIVEAWAY = "🎁 Розыгрыш"
+BTN_HELP = "❓ Помощь"
 SUPPORT_URL = "https://t.me/trumpvpnhelp"
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-08-15-17"
 TERMS_OF_USE_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-08-15-10"
@@ -10767,16 +10766,30 @@ def _fix_mojibake_text(value: str | None) -> str:
     text = str(value or "")
     if not text:
         return text
-    # Try to recover strings that were decoded as cp1251 instead of utf-8.
     if all(ord(ch) < 128 for ch in text):
         return text
+
+    payload = bytearray()
+    for ch in text:
+        try:
+            encoded = ch.encode("cp1251")
+            if len(encoded) != 1:
+                return text
+            payload.append(encoded[0])
+            continue
+        except Exception:
+            pass
+        code = ord(ch)
+        if code <= 255:
+            payload.append(code)
+        else:
+            return text
+
     try:
-        fixed = text.encode("cp1251").decode("utf-8")
+        fixed = payload.decode("utf-8")
     except Exception:
         return text
-    if not fixed:
-        return text
-    return fixed
+    return fixed or text
 
 
 def _normalize_reply_markup(markup: Any) -> Any:
