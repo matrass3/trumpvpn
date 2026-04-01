@@ -10767,35 +10767,64 @@ def _fix_mojibake_text(value: str | None) -> str:
     text = str(value or "")
     if not text:
         return text
-    markers = ("??", "??", "??", "??", "??", "??", "??", "??", "??", "??")
-    if not any(marker in text for marker in markers):
+    # Try to recover strings that were decoded as cp1251 instead of utf-8.
+    if all(ord(ch) < 128 for ch in text):
         return text
     try:
         fixed = text.encode("cp1251").decode("utf-8")
     except Exception:
         return text
-    return fixed if fixed else text
+    if not fixed:
+        return text
+    return fixed
 
 
 def _normalize_reply_markup(markup: Any) -> Any:
     if not markup:
         return markup
     try:
-        rows = getattr(markup, "inline_keyboard", None)
-        if rows:
-            for row in rows:
+        if isinstance(markup, InlineKeyboardMarkup):
+            rows: list[list[InlineKeyboardButton]] = []
+            for row in list(markup.inline_keyboard or []):
+                new_row: list[InlineKeyboardButton] = []
                 for btn in row:
-                    if hasattr(btn, "text") and isinstance(btn.text, str):
-                        btn.text = _fix_mojibake_text(btn.text)
-        rows2 = getattr(markup, "keyboard", None)
-        if rows2:
-            for row in rows2:
-                for btn in row:
-                    if hasattr(btn, "text") and isinstance(btn.text, str):
-                        btn.text = _fix_mojibake_text(btn.text)
+                    if isinstance(btn, InlineKeyboardButton):
+                        payload = btn.model_dump(exclude_none=True)
+                        payload["text"] = _fix_mojibake_text(str(payload.get("text") or ""))
+                        new_row.append(InlineKeyboardButton(**payload))
+                    else:
+                        new_row.append(btn)
+                rows.append(new_row)
+            return InlineKeyboardMarkup(inline_keyboard=rows)
     except Exception:
         return markup
     return markup
+
+
+if not getattr(Bot, "_tvpn_mojibake_patch", False):
+    _orig_bot_send_message = Bot.send_message
+    _orig_bot_edit_message_text = Bot.edit_message_text
+    _orig_bot_send_photo = Bot.send_photo
+
+    async def _patched_bot_send_message(self, chat_id, text, *args, **kwargs):
+        kwargs["reply_markup"] = _normalize_reply_markup(kwargs.get("reply_markup"))
+        return await _orig_bot_send_message(self, chat_id, _fix_mojibake_text(text), *args, **kwargs)
+
+    async def _patched_bot_edit_message_text(self, text, *args, **kwargs):
+        kwargs["reply_markup"] = _normalize_reply_markup(kwargs.get("reply_markup"))
+        return await _orig_bot_edit_message_text(self, _fix_mojibake_text(text), *args, **kwargs)
+
+    async def _patched_bot_send_photo(self, chat_id, photo, *args, **kwargs):
+        kwargs["reply_markup"] = _normalize_reply_markup(kwargs.get("reply_markup"))
+        caption = kwargs.get("caption")
+        if isinstance(caption, str):
+            kwargs["caption"] = _fix_mojibake_text(caption)
+        return await _orig_bot_send_photo(self, chat_id, photo, *args, **kwargs)
+
+    Bot.send_message = _patched_bot_send_message
+    Bot.edit_message_text = _patched_bot_edit_message_text
+    Bot.send_photo = _patched_bot_send_photo
+    Bot._tvpn_mojibake_patch = True
 
 
 if not getattr(Message, "_tvpn_mojibake_patch", False):
