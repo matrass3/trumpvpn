@@ -3060,6 +3060,12 @@ def public_cabinet_page_slash():
     return _public_ui_index_response()
 
 
+@app.get("/cabinet/{path:path}")
+def public_cabinet_nested_page(path: str):
+    _ = path
+    return _public_ui_index_response()
+
+
 @app.get("/api/public/config")
 def public_config_api():
     bot_url = str(settings.public_bot_url or "https://t.me/trumpvlessbot").strip() or "https://t.me/trumpvlessbot"
