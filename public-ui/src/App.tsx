@@ -138,6 +138,21 @@ function sanitizeError(raw: string) {
   const text = extracted.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   if (!text) return "Request failed";
 
+  if (/telegram user not found/i.test(text)) return "Пользователь Telegram не найден. Откройте Mini App через кнопку в боте.";
+  if (/signature mismatch|invalid init_data|expired/i.test(text)) return "Сессия Telegram истекла. Откройте Mini App заново из бота.";
+
+  if (/vpn revoke failed/i.test(text)) {
+    const cfgMatch = text.match(/cfg#(\d+)/i);
+    const cfgSuffix = cfgMatch ? ` (конфиг #${cfgMatch[1]})` : "";
+    if (/authentication failed/i.test(text)) {
+      return `Не удалось удалить устройство${cfgSuffix}: ошибка SSH-аутентификации на сервере.`;
+    }
+    if (/jq: error|cannot iterate over null/i.test(text)) {
+      return `Не удалось удалить устройство${cfgSuffix}: ошибка конфигурации VPN-сервера.`;
+    }
+    return `Не удалось удалить устройство${cfgSuffix}. Попробуйте позже.`;
+  }
+
   const insufficient = text.match(/insufficient balance\.?\s*need\s*(\d+)\s*rub,\s*missing\s*(\d+)\s*rub/i);
   if (insufficient) {
     const need = Number(insufficient[1] || 0);
@@ -201,14 +216,22 @@ function openPaymentUrl(url: string): boolean {
 }
 
 function extractRawQueryParam(name: string): string {
-  const query = window.location.search.startsWith("?") ? window.location.search.slice(1) : "";
-  if (!query) return "";
-  const parts = query.split("&");
-  for (const item of parts) {
-    if (!item) continue;
-    const eqPos = item.indexOf("=");
-    const key = eqPos >= 0 ? item.slice(0, eqPos) : item;
-    if (key === name) return eqPos >= 0 ? item.slice(eqPos + 1) : "";
+  const sources: string[] = [];
+  if (window.location.search.startsWith("?")) sources.push(window.location.search.slice(1));
+  const hashRaw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  if (hashRaw) {
+    const hashQueryPos = hashRaw.indexOf("?");
+    sources.push(hashQueryPos >= 0 ? hashRaw.slice(hashQueryPos + 1) : hashRaw);
+  }
+  for (const source of sources) {
+    if (!source) continue;
+    const parts = source.split("&");
+    for (const item of parts) {
+      if (!item) continue;
+      const eqPos = item.indexOf("=");
+      const key = eqPos >= 0 ? item.slice(0, eqPos) : item;
+      if (key === name) return eqPos >= 0 ? item.slice(eqPos + 1) : "";
+    }
   }
   return "";
 }
@@ -364,16 +387,27 @@ function CabinetPage() {
   const authRetryTimer = useRef<number | null>(null);
   const authRetryStopped = useRef(false);
   const showNotificationsRef = useRef(false);
+  const recentNoticeMap = useRef<Map<string, number>>(new Map());
 
   const pushNotice = useCallback((kind: NoticeKind, body: string, title?: string) => {
+    const now = Date.now();
+    const normalizedTitle = title || noticeTitleByKind(kind);
+    const dedupeKey = `${kind}|${normalizedTitle}|${String(body || "").trim()}`;
+    const prevTs = recentNoticeMap.current.get(dedupeKey) || 0;
+    if (now - prevTs < 12000) return;
+    recentNoticeMap.current.set(dedupeKey, now);
+    for (const [key, ts] of recentNoticeMap.current.entries()) {
+      if (now - ts > 90000) recentNoticeMap.current.delete(key);
+    }
+
     const id = ++noticeSeq.current;
     const entry: AppNotice = {
       id,
       kind,
-      title: title || noticeTitleByKind(kind),
+      title: normalizedTitle,
       body,
       read: false,
-      created_at: Date.now(),
+      created_at: now,
     };
     setNotifications((prev) => [entry, ...prev].slice(0, 30));
     if (!showNotificationsRef.current) {
@@ -476,6 +510,14 @@ function CabinetPage() {
       await refresh();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Action failed";
+      if (/unauthorized|401|авторизац/i.test(msg)) {
+        setUnauthorized(true);
+        setSnapshot(null);
+        setMiniAppAuthError("Сессия обновляется через Telegram...");
+        authRetryStopped.current = false;
+        authRetryAttempt.current = 0;
+        return;
+      }
       pushNotice("error", msg);
       triggerNotify("error");
     } finally {
@@ -523,8 +565,16 @@ function CabinetPage() {
     const run = async (silent = true) => {
       const initData = getTelegramMiniAppInitData();
       if (!initData) {
-        setMiniAppAuthError("Open this cabinet from Telegram bot menu. Mini App init data is missing.");
-        authRetryStopped.current = true;
+        authRetryAttempt.current += 1;
+        if (authRetryAttempt.current > 20) {
+          setMiniAppAuthError("Не удалось получить данные Telegram Mini App. Откройте приложение заново из бота.");
+          authRetryStopped.current = true;
+          return false;
+        }
+        setMiniAppAuthError("Ожидание данных Telegram Mini App...");
+        authRetryTimer.current = window.setTimeout(() => {
+          if (!cancelled) void run(true);
+        }, 800);
         return false;
       }
       const ok = await loginWithMiniApp(initData, silent);
