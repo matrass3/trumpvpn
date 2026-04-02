@@ -96,6 +96,7 @@ const GATEWAYS = [
   { code: "platega_crypto", title: "Platega Crypto" },
   { code: "yoomoney", title: "YooMoney" },
 ];
+const PUBLIC_SESSION_STORAGE_KEY = "trumpvpn_public_session";
 
 function fmtRub(value: number | null | undefined) {
   return `${Intl.NumberFormat("ru-RU").format(Number(value || 0))} RUB`;
@@ -249,11 +250,13 @@ function getTelegramMiniAppInitData() {
 }
 
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const sessionToken = String(window.localStorage.getItem(PUBLIC_SESSION_STORAGE_KEY) || "").trim();
   const response = await fetch(url, {
     ...init,
     credentials: "include",
     headers: {
       Accept: "application/json",
+      ...(sessionToken ? { "X-Public-Session": sessionToken } : {}),
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...(init?.headers || {}),
     },
@@ -532,7 +535,14 @@ function CabinetPage() {
       try {
         setMiniAppAuthPending(true);
         setMiniAppAuthError("");
-        await apiJson("/api/public/auth/miniapp", { method: "POST", body: JSON.stringify({ init_data: initData }) });
+        const auth = await apiJson<{ ok: boolean; session_token?: string }>("/api/public/auth/miniapp", {
+          method: "POST",
+          body: JSON.stringify({ init_data: initData }),
+        });
+        const sessionToken = String(auth.session_token || "").trim();
+        if (sessionToken) {
+          window.localStorage.setItem(PUBLIC_SESSION_STORAGE_KEY, sessionToken);
+        }
         await refresh();
         authRetryAttempt.current = 0;
         authRetryStopped.current = false;
@@ -607,6 +617,7 @@ function CabinetPage() {
   async function logout() {
     await withAction(async () => {
       await apiJson("/api/public/auth/logout", { method: "POST" });
+      window.localStorage.removeItem(PUBLIC_SESSION_STORAGE_KEY);
       setUnauthorized(true);
       setSnapshot(null);
       setShowNotifications(false);

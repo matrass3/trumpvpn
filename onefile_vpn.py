@@ -724,13 +724,16 @@ def _request_is_https(request: Request | None) -> bool:
 
 
 def _set_public_user_cookie(response: Any, telegram_id: int, request: Request | None = None) -> None:
+    is_https = _request_is_https(request)
     response.set_cookie(
         key=PUBLIC_USER_COOKIE,
         value=make_public_user_session_token(int(telegram_id)),
         max_age=max(1, int(settings.public_user_session_hours or 720)) * 3600,
         httponly=True,
-        secure=_request_is_https(request),
-        samesite="lax",
+        secure=is_https,
+        # Telegram Mini App can treat requests as embedded context on some clients.
+        # SameSite=None + Secure improves cookie delivery reliability there.
+        samesite="none" if is_https else "lax",
         path="/",
     )
 
@@ -815,6 +818,8 @@ def _verify_telegram_miniapp_init_data(init_data_raw: str) -> tuple[int, str | N
 
 def _public_user_from_request(request: Request, db: Session) -> User:
     token = request.cookies.get(PUBLIC_USER_COOKIE)
+    if not token:
+        token = str(request.headers.get("x-public-session", "") or "").strip()
     payload = parse_public_user_session_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -3196,8 +3201,10 @@ def public_auth_telegram(payload: TelegramAuthRequest, request: Request, respons
     telegram_id, username = _verify_telegram_auth_payload(payload)
     user = get_or_create_user(db, telegram_id=telegram_id, username=username)
     _set_public_user_cookie(response, telegram_id=telegram_id, request=request)
+    session_token = make_public_user_session_token(int(telegram_id))
     return {
         "ok": True,
+        "session_token": session_token,
         "user": {
             "telegram_id": int(user.telegram_id),
             "username": str(user.username or ""),
@@ -3215,8 +3222,10 @@ def public_auth_miniapp(
     telegram_id, username = _verify_telegram_miniapp_init_data(payload.init_data)
     user = get_or_create_user(db, telegram_id=telegram_id, username=username)
     _set_public_user_cookie(response, telegram_id=telegram_id, request=request)
+    session_token = make_public_user_session_token(int(telegram_id))
     return {
         "ok": True,
+        "session_token": session_token,
         "user": {
             "telegram_id": int(user.telegram_id),
             "username": str(user.username or ""),
