@@ -821,13 +821,23 @@ def _public_user_from_request(request: Request, db: Session) -> User:
     if not token:
         token = str(request.headers.get("x-public-session", "") or "").strip()
     payload = parse_public_user_session_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    telegram_id = int(payload.get("telegram_id") or 0)
-    user = fetch_user_with_configs(db, telegram_id)
-    if not user:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return user
+    telegram_id = int(payload.get("telegram_id") or 0) if payload else 0
+    if telegram_id > 0:
+        user = fetch_user_with_configs(db, telegram_id)
+        if user:
+            return user
+
+    # Fallback for Telegram Mini App when client cookies are not persisted.
+    init_data = str(request.headers.get("x-telegram-init-data", "") or "").strip()
+    if init_data:
+        telegram_id, username = _verify_telegram_miniapp_init_data(init_data)
+        user = get_or_create_user(db, telegram_id=telegram_id, username=username)
+        loaded = fetch_user_with_configs(db, telegram_id)
+        if loaded:
+            return loaded
+        return user
+
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def _public_cabinet_payload(db: Session, user: User) -> dict[str, Any]:

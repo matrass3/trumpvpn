@@ -251,12 +251,14 @@ function getTelegramMiniAppInitData() {
 
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const sessionToken = String(window.localStorage.getItem(PUBLIC_SESSION_STORAGE_KEY) || "").trim();
+  const miniAppInitData = getTelegramMiniAppInitData();
   const response = await fetch(url, {
     ...init,
     credentials: "include",
     headers: {
       Accept: "application/json",
       ...(sessionToken ? { "X-Public-Session": sessionToken } : {}),
+      ...(miniAppInitData ? { "X-Telegram-Init-Data": miniAppInitData } : {}),
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...(init?.headers || {}),
     },
