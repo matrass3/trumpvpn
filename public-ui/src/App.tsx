@@ -2,7 +2,6 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import "./styles.css";
 
 type PublicConfig = { bot_url: string; brand: string; bot_username?: string; support_url?: string };
-type TelegramAuthPayload = { id: number; username?: string; auth_date: number; hash: string };
 type CabinetSection = "dashboard" | "subscription" | "balance" | "referrals" | "giveaways" | "help";
 type NoticeKind = "info" | "success" | "warn" | "error";
 
@@ -64,7 +63,6 @@ type AppNotice = {
 
 declare global {
   interface Window {
-    onTelegramAuth?: (user: TelegramAuthPayload) => void;
     Telegram?: {
       WebApp?: {
         initData?: string;
@@ -231,30 +229,6 @@ function usePublicConfig() {
   return config;
 }
 
-function TelegramLoginButton({ botUsername, onAuth }: { botUsername: string; onAuth: (payload: TelegramAuthPayload) => void }) {
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!ref.current || !botUsername) return;
-    window.onTelegramAuth = (user) => onAuth(user);
-    ref.current.innerHTML = "";
-    const script = document.createElement("script");
-    script.src = "https://telegram.org/js/telegram-widget.js?22";
-    script.async = true;
-    script.setAttribute("data-telegram-login", botUsername);
-    script.setAttribute("data-size", "large");
-    script.setAttribute("data-userpic", "false");
-    script.setAttribute("data-request-access", "write");
-    script.setAttribute("data-onauth", "onTelegramAuth(user)");
-    ref.current.appendChild(script);
-    return () => {
-      delete window.onTelegramAuth;
-    };
-  }, [botUsername, onAuth]);
-
-  return <div className="telegram-widget-slot" ref={ref} />;
-}
-
 function LandingPage() {
   const config = usePublicConfig();
 
@@ -318,8 +292,8 @@ function CabinetPage() {
   const [promoCode, setPromoCode] = useState("");
   const [invoiceToCheck, setInvoiceToCheck] = useState(0);
   const [createdInvoice, setCreatedInvoice] = useState<{ invoice_id: number; pay_url: string } | null>(null);
-  const [miniAppAuthTried, setMiniAppAuthTried] = useState(false);
   const [miniAppAuthPending, setMiniAppAuthPending] = useState(false);
+  const [miniAppAuthError, setMiniAppAuthError] = useState("");
   const [notifications, setNotifications] = useState<AppNotice[]>([]);
   const [toasts, setToasts] = useState<AppNotice[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -443,28 +417,26 @@ function CabinetPage() {
     }
   }
 
-  async function login(payload: TelegramAuthPayload) {
-    await withAction(async () => {
-      await apiJson("/api/public/auth/telegram", { method: "POST", body: JSON.stringify(payload) });
-      pushNotice("success", "Login successful.");
-      triggerNotify("success");
-    });
-  }
-
   const loginWithMiniApp = useCallback(
-    async (initDataRaw: string) => {
+    async (initDataRaw: string, silent = false) => {
       const initData = String(initDataRaw || "").trim();
       if (!initData) return false;
       try {
         setMiniAppAuthPending(true);
+        setMiniAppAuthError("");
         await apiJson("/api/public/auth/miniapp", { method: "POST", body: JSON.stringify({ init_data: initData }) });
         await refresh();
-        pushNotice("success", "Logged in via Telegram Mini App.", "Telegram");
-        triggerNotify("success");
+        if (!silent) {
+          pushNotice("success", "Logged in via Telegram Mini App.", "Telegram");
+          triggerNotify("success");
+        }
         return true;
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Mini App auth failed";
-        pushNotice("warn", msg, "Telegram");
+        setMiniAppAuthError(msg);
+        if (!silent) {
+          pushNotice("warn", msg, "Telegram");
+        }
         return false;
       } finally {
         setMiniAppAuthPending(false);
@@ -474,25 +446,26 @@ function CabinetPage() {
   );
 
   useEffect(() => {
-    if (!unauthorized || miniAppAuthTried || miniAppAuthPending) return;
+    if (!unauthorized || miniAppAuthPending) return;
     let cancelled = false;
-    let attempts = 0;
-    const run = async () => {
-      if (cancelled) return;
+    const run = async (silent = true) => {
       const initData = getTelegramMiniAppInitData();
       if (!initData) {
-        attempts += 1;
-        if (attempts < 12) window.setTimeout(run, 250);
-        return;
+        setMiniAppAuthError("Open this cabinet from Telegram bot menu. Mini App init data is missing.");
+        return false;
       }
-      setMiniAppAuthTried(true);
-      await loginWithMiniApp(initData);
+      return loginWithMiniApp(initData, silent);
     };
-    void run();
+    void run(true);
+    const timer = window.setInterval(() => {
+      if (cancelled) return;
+      void run(true);
+    }, 1800);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
-  }, [unauthorized, miniAppAuthTried, miniAppAuthPending, loginWithMiniApp]);
+  }, [unauthorized, miniAppAuthPending, loginWithMiniApp]);
 
   async function logout() {
     await withAction(async () => {
@@ -663,9 +636,24 @@ function CabinetPage() {
 
         {!pending && unauthorized ? (
           <section className="panel">
-            <h2>Login via Telegram</h2>
-            <p>{miniAppAuthPending ? "Authorizing via Telegram Mini App..." : "Use secure Telegram auth."}</p>
-            {!miniAppAuthPending ? <TelegramLoginButton botUsername={String(config.bot_username || "trumpvlessbot")} onAuth={(payload) => void login(payload)} /> : null}
+            <h2>Telegram Mini App Login</h2>
+            <p>{miniAppAuthPending ? "Authorizing via Telegram Mini App..." : miniAppAuthError || "Waiting for Telegram Mini App session..."}</p>
+            <div className="action-row">
+              <a className="ui-btn primary" href={config.bot_url} target="_blank" rel="noreferrer noopener">
+                Open bot and launch Mini App
+              </a>
+              <button
+                className="ui-btn ghost"
+                type="button"
+                onClick={() => {
+                  const initData = getTelegramMiniAppInitData();
+                  void loginWithMiniApp(initData, false);
+                }}
+                disabled={miniAppAuthPending}
+              >
+                Retry mini app auth
+              </button>
+            </div>
           </section>
         ) : null}
 
