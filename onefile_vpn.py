@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     welcome_channel_url: str = "https://t.me/trumpxvpn"
     welcome_channel_chat: str = "@trumpxvpn"
     public_bot_url: str = "https://t.me/trumpvlessbot"
+    public_help_url: str = "https://t.me/trumpvpnhelp"
     public_user_session_hours: int = 720
     payments_notify_chat_id: int = -1003861242059
     happ_import_url_template: str = "happ://add?url={url}"
@@ -615,6 +616,10 @@ class TelegramAuthRequest(BaseModel):
     hash: str
 
 
+class TelegramMiniAppAuthRequest(BaseModel):
+    init_data: str = Field(min_length=10, max_length=8192)
+
+
 def require_internal_token(x_internal_token: str = Header(default="")) -> None:
     if x_internal_token != settings.internal_api_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal token")
@@ -755,6 +760,52 @@ def _verify_telegram_auth_payload(payload: TelegramAuthRequest) -> tuple[int, st
     if telegram_id <= 0:
         raise HTTPException(status_code=401, detail="Invalid Telegram user")
     return telegram_id, str(payload.username or "").strip() or None
+
+
+def _verify_telegram_miniapp_init_data(init_data_raw: str) -> tuple[int, str | None]:
+    bot_token = str(settings.bot_token or "").strip()
+    if not bot_token:
+        raise HTTPException(status_code=503, detail="Telegram auth is not configured")
+    init_data = str(init_data_raw or "").strip()
+    if not init_data or "=" not in init_data:
+        raise HTTPException(status_code=401, detail="Invalid init_data")
+
+    parsed = parse_qs(init_data, keep_blank_values=True, strict_parsing=False)
+    provided_hash = str((parsed.pop("hash", [""])[0] or "")).strip().lower()
+    if not provided_hash:
+        raise HTTPException(status_code=401, detail="Invalid init_data hash")
+
+    flat: dict[str, str] = {}
+    for key, values in parsed.items():
+        if not values:
+            flat[str(key)] = ""
+        else:
+            flat[str(key)] = str(values[0] or "")
+    auth_date = int(flat.get("auth_date") or 0)
+    now_ts = int(time.time())
+    if auth_date <= 0 or auth_date < now_ts - 86400 or auth_date > now_ts + 600:
+        raise HTTPException(status_code=401, detail="Telegram auth expired")
+
+    data_check_string = "\n".join(f"{key}={flat[key]}" for key in sorted(flat.keys()))
+    secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+    expected_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_hash, provided_hash):
+        raise HTTPException(status_code=401, detail="Telegram mini app signature mismatch")
+
+    user_raw = str(flat.get("user") or "").strip()
+    user_payload: dict[str, Any] = {}
+    if user_raw:
+        try:
+            decoded = json.loads(user_raw)
+            if isinstance(decoded, dict):
+                user_payload = decoded
+        except Exception:
+            user_payload = {}
+    telegram_id = int(user_payload.get("id") or 0)
+    if telegram_id <= 0:
+        raise HTTPException(status_code=401, detail="Telegram user not found in init_data")
+    username = str(user_payload.get("username") or "").strip() or None
+    return telegram_id, username
 
 
 def _public_user_from_request(request: Request, db: Session) -> User:
@@ -3072,16 +3123,37 @@ def public_config_api():
     bot_username = str(bot_url.rsplit("/", 1)[-1] or "").strip().lstrip("@")
     if not bot_username:
         bot_username = "trumpvlessbot"
+    support_url = str(settings.public_help_url or "https://t.me/trumpvpnhelp").strip() or "https://t.me/trumpvpnhelp"
     return {
         "brand": "TrumpVPN",
         "bot_url": bot_url,
         "bot_username": bot_username,
+        "support_url": support_url,
     }
 
 
 @app.post("/api/public/auth/telegram")
 def public_auth_telegram(payload: TelegramAuthRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     telegram_id, username = _verify_telegram_auth_payload(payload)
+    user = get_or_create_user(db, telegram_id=telegram_id, username=username)
+    _set_public_user_cookie(response, telegram_id=telegram_id, request=request)
+    return {
+        "ok": True,
+        "user": {
+            "telegram_id": int(user.telegram_id),
+            "username": str(user.username or ""),
+        },
+    }
+
+
+@app.post("/api/public/auth/miniapp")
+def public_auth_miniapp(
+    payload: TelegramMiniAppAuthRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    telegram_id, username = _verify_telegram_miniapp_init_data(payload.init_data)
     user = get_or_create_user(db, telegram_id=telegram_id, username=username)
     _set_public_user_cookie(response, telegram_id=telegram_id, request=request)
     return {
@@ -3165,6 +3237,55 @@ def public_cabinet_join_giveaway(payload: dict[str, Any], request: Request, db: 
     user = _public_user_from_request(request, db)
     giveaway_id = int(payload.get("giveaway_id") or 0)
     return join_giveaway({"telegram_id": int(user.telegram_id), "giveaway_id": giveaway_id}, db)
+
+
+@app.post("/api/public/cabinet/configs/revoke")
+def public_cabinet_revoke_config(payload: dict[str, Any], request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    config_id = int(payload.get("config_id") or 0)
+    if config_id <= 0:
+        raise HTTPException(status_code=400, detail="config_id is required")
+    target_cfg = db.scalar(
+        select(ClientConfig).where(
+            ClientConfig.id == config_id,
+            ClientConfig.user_id == user.id,
+            ClientConfig.is_active.is_(True),
+        )
+    )
+    if not target_cfg:
+        raise HTTPException(status_code=404, detail="Active config not found")
+    device_name = str(target_cfg.device_name or "").strip()
+    rows = db.scalars(
+        select(ClientConfig).where(
+            ClientConfig.user_id == user.id,
+            ClientConfig.device_name == device_name,
+            ClientConfig.is_active.is_(True),
+        )
+    ).all()
+    removed_ids, errors, warnings = _remove_active_configs_remotely_grouped(
+        db,
+        rows,
+        remove_timeout=90.0,
+        restart_timeout=90.0,
+    )
+    now = utc_now()
+    revoked = 0
+    for cfg in rows:
+        if int(cfg.id) not in removed_ids:
+            continue
+        cfg.is_active = False
+        cfg.revoked_at = now
+        revoked += 1
+    db.commit()
+    all_errors = list(errors) + list(warnings)
+    if revoked <= 0 and all_errors:
+        raise HTTPException(status_code=502, detail=f"VPN revoke failed: {all_errors[0]}")
+    return {
+        "status": "ok",
+        "config_id": int(target_cfg.id),
+        "revoked_count": int(revoked),
+        "errors": all_errors,
+    }
 
 
 @app.get("/api/public/subscription/{telegram_id}/{token}")

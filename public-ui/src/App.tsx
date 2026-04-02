@@ -1,7 +1,7 @@
 ﻿import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./styles.css";
 
-type PublicConfig = { bot_url: string; brand: string; bot_username?: string };
+type PublicConfig = { bot_url: string; brand: string; bot_username?: string; support_url?: string };
 type TelegramAuthPayload = { id: number; username?: string; auth_date: number; hash: string };
 type CabinetSection = "dashboard" | "subscription" | "balance" | "referrals" | "giveaways";
 
@@ -20,6 +20,7 @@ type CabinetSnapshot = {
       server_name: string;
       protocol: string;
       device_name: string;
+      vless_url: string;
       is_active: boolean;
       created_at: string;
     }>;
@@ -52,6 +53,13 @@ type SubscriptionPreview = {
 declare global {
   interface Window {
     onTelegramAuth?: (user: TelegramAuthPayload) => void;
+    Telegram?: {
+      WebApp?: {
+        initData?: string;
+        ready?: () => void;
+        expand?: () => void;
+      };
+    };
   }
 }
 
@@ -151,6 +159,7 @@ function usePublicConfig() {
     bot_url: "https://t.me/trumpvlessbot",
     brand: "TrumpVPN",
     bot_username: "trumpvlessbot",
+    support_url: "https://t.me/trumpvpnhelp",
   });
 
   useEffect(() => {
@@ -162,6 +171,7 @@ function usePublicConfig() {
           bot_url: String(payload.bot_url || prev.bot_url),
           brand: String(payload.brand || prev.brand),
           bot_username: String(payload.bot_username || prev.bot_username || "trumpvlessbot"),
+          support_url: String(payload.support_url || prev.support_url || "https://t.me/trumpvpnhelp"),
         }));
       })
       .catch(() => undefined);
@@ -229,6 +239,7 @@ function CabinetPage() {
   const [promoCode, setPromoCode] = useState("");
   const [invoiceToCheck, setInvoiceToCheck] = useState(0);
   const [createdInvoice, setCreatedInvoice] = useState<{ invoice_id: number; pay_url: string } | null>(null);
+  const [miniAppAuthTried, setMiniAppAuthTried] = useState(false);
 
   useEffect(() => {
     const onPop = () => setSection(sectionFromPath(window.location.pathname));
@@ -285,6 +296,15 @@ function CabinetPage() {
     await withAction(async () => {
       await apiJson("/api/public/auth/telegram", { method: "POST", body: JSON.stringify(payload) });
       setMessage("Login successful.");
+    });
+  }
+
+  async function loginWithMiniApp() {
+    const initData = String(window.Telegram?.WebApp?.initData || "").trim();
+    if (!initData) return;
+    await withAction(async () => {
+      await apiJson("/api/public/auth/miniapp", { method: "POST", body: JSON.stringify({ init_data: initData }) });
+      setMessage("Logged in from Telegram Mini App.");
     });
   }
 
@@ -360,6 +380,13 @@ function CabinetPage() {
     });
   }
 
+  async function revokeConfig(configId: number) {
+    await withAction(async () => {
+      await apiJson("/api/public/cabinet/configs/revoke", { method: "POST", body: JSON.stringify({ config_id: configId }) });
+      setMessage("Config revoked.");
+    });
+  }
+
   async function copyText(value: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -373,6 +400,20 @@ function CabinetPage() {
   const daysLeft = getDaysLeft(snapshot?.user.subscription_until);
   const botRefLink = `${config.bot_url}?start=ref${snapshot?.user.telegram_id || ""}`;
   const cabinetRefLink = `${window.location.origin}/cabinet?ref=${snapshot?.user.telegram_id || ""}`;
+  const activeConfigs = (snapshot?.user.configs || []).filter((cfg) => cfg.is_active);
+
+  useEffect(() => {
+    if (!unauthorized || miniAppAuthTried) return;
+    const initData = String(window.Telegram?.WebApp?.initData || "").trim();
+    if (!initData) return;
+    setMiniAppAuthTried(true);
+    void loginWithMiniApp();
+  }, [miniAppAuthTried, unauthorized]);
+
+  useEffect(() => {
+    window.Telegram?.WebApp?.ready?.();
+    window.Telegram?.WebApp?.expand?.();
+  }, []);
 
   return (
     <main className="cabinet-root">
@@ -382,9 +423,14 @@ function CabinetPage() {
             Close
           </button>
           <div className="mobile-brand">{config.brand}</div>
-          <button className="chip-btn" type="button" onClick={() => void refresh()}>
-            Reload
-          </button>
+          <div className="top-actions">
+            <a className="chip-btn" href={config.support_url || "https://t.me/trumpvpnhelp"} target="_blank" rel="noreferrer noopener">
+              Help
+            </a>
+            <button className="chip-btn" type="button" onClick={() => void refresh()}>
+              Reload
+            </button>
+          </div>
         </header>
 
         {message ? <div className="toast ok">{message}</div> : null}
@@ -459,6 +505,20 @@ function CabinetPage() {
                     </button>
                   </article>
                 </div>
+
+                <article className="panel">
+                  <h3>Quick tools</h3>
+                  <div className="action-row">
+                    {activeConfigs[0]?.vless_url ? (
+                      <button className="ui-btn ghost" type="button" onClick={() => void copyText(activeConfigs[0].vless_url)}>
+                        Copy access key
+                      </button>
+                    ) : null}
+                    <a className="ui-btn ghost" href={config.support_url || "https://t.me/trumpvpnhelp"} target="_blank" rel="noreferrer noopener">
+                      Help
+                    </a>
+                  </div>
+                </article>
               </section>
             ) : null}
             {section === "subscription" ? (
@@ -483,6 +543,28 @@ function CabinetPage() {
                       </div>
                     </div>
                   ))}
+                </article>
+                <article className="panel plan-list">
+                  <h3>Access keys</h3>
+                  {activeConfigs.map((cfg) => (
+                    <div key={cfg.id} className="plan-row key-row">
+                      <div>
+                        <strong>
+                          {cfg.server_name} · {cfg.device_name}
+                        </strong>
+                        <small>{cfg.protocol}</small>
+                      </div>
+                      <div className="action-row">
+                        <button className="ui-btn ghost small" type="button" onClick={() => void copyText(cfg.vless_url)}>
+                          Copy key
+                        </button>
+                        <button className="ui-btn ghost small danger" type="button" onClick={() => void revokeConfig(cfg.id)} disabled={actionPending}>
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {!activeConfigs.length ? <div className="empty">No active keys.</div> : null}
                 </article>
               </section>
             ) : null}

@@ -98,6 +98,11 @@ a {
   margin-bottom: 8px;
 }
 
+.top-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
 .mobile-brand {
   text-align: center;
   font-weight: 700;
@@ -110,6 +115,14 @@ a {
   background: linear-gradient(145deg, var(--panel), var(--panel-soft));
   padding: 16px;
   margin-bottom: 12px;
+  animation: panelIn 280ms ease;
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.panel:hover {
+  transform: translateY(-2px);
+  border-color: rgba(122, 170, 255, 0.45);
+  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.24);
 }
 
 .panel h1,
@@ -304,6 +317,17 @@ a {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+}
+
+.ui-btn:hover {
+  transform: translateY(-1px);
+}
+
+.ui-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .ui-btn.primary {
@@ -318,6 +342,22 @@ a {
   background: rgba(12, 27, 56, 0.75);
 }
 
+.ui-btn.small {
+  padding: 8px 10px;
+  border-radius: 11px;
+  font-size: 12px;
+  min-width: 92px;
+}
+
+.ui-btn.danger {
+  border-color: rgba(255, 77, 115, 0.45);
+  color: #ff9cb3;
+}
+
+.key-row {
+  align-items: flex-start;
+}
+
 .chip-btn {
   border: 1px solid var(--line);
   background: rgba(20, 40, 72, 0.8);
@@ -326,6 +366,12 @@ a {
   padding: 9px 12px;
   font: inherit;
   cursor: pointer;
+  transition: transform 150ms ease, border-color 150ms ease;
+}
+
+.chip-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(132, 182, 255, 0.5);
 }
 
 .bottom-nav {
@@ -368,6 +414,7 @@ a {
 .nav-item.active {
   color: #dff3ff;
   background: linear-gradient(140deg, rgba(47, 201, 255, 0.26), rgba(47, 201, 255, 0.12));
+  box-shadow: 0 8px 20px rgba(47, 201, 255, 0.2);
 }
 
 .toast {
@@ -388,6 +435,17 @@ a {
   border-color: rgba(255, 77, 115, 0.5);
   background: rgba(255, 77, 115, 0.15);
   color: #ff9cb3;
+}
+
+@keyframes panelIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .sub-shell .stats-row {
