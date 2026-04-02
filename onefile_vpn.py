@@ -2030,6 +2030,52 @@ def remove_vless_client(
     timeout: float = 90.0,
     restart: bool = True,
 ) -> bool:
+    def _looks_like_ssh_auth_error(raw_error: str) -> bool:
+        text = str(raw_error or "").lower()
+        return (
+            "authentication failed" in text
+            or "permission denied" in text
+            or "bad authentication type" in text
+            or "private key file is encrypted" in text
+            or "not a valid rsa private key file" in text
+        )
+
+    def _looks_like_remote_remove_script_error(raw_error: str) -> bool:
+        text = str(raw_error or "").lower()
+        return (
+            "jq: error" in text
+            or "cannot iterate over null" in text
+            or "failed to remove uuid from config" in text
+            or "config not found" in text
+            or "unknown argument" in text
+            or "no such file or directory" in text
+            or "not found" in text
+        )
+
+    def _remove_vless_client_inline_fallback() -> None:
+        inline_body = (
+            "set -euo pipefail; "
+            "CONFIG=${XRAY_CONFIG:-}; "
+            "if [ -z \"$CONFIG\" ]; then "
+            "if [ -f /usr/local/etc/xray/config.json ]; then CONFIG=/usr/local/etc/xray/config.json; "
+            "elif [ -f /etc/xray/config.json ]; then CONFIG=/etc/xray/config.json; "
+            "else echo 'xray config not found' >&2; exit 1; fi; "
+            "fi; "
+            "[ -f \"$CONFIG\" ] || { echo \"xray config not found: $CONFIG\" >&2; exit 1; }; "
+            "command -v jq >/dev/null 2>&1 || { echo 'jq is required' >&2; exit 1; }; "
+            "TMP=$(mktemp); "
+            "trap 'rm -f \"$TMP\"' EXIT; "
+            f"jq --arg uuid {shlex.quote(client_uuid)} "
+            "' .inbounds |= (if type == \"array\" then map(if (.settings? | type) == \"object\" and (.settings.clients? | type) == \"array\" then .settings.clients |= map(select((.id // \"\") != $uuid)) else . end) else . end) ' "
+            "\"$CONFIG\" > \"$TMP\"; "
+            "mv \"$TMP\" \"$CONFIG\"; "
+            "chown root:root \"$CONFIG\" >/dev/null 2>&1 || true; "
+            "chmod 644 \"$CONFIG\" >/dev/null 2>&1 || true; "
+            "echo 'OK: inline remove applied'"
+        )
+        inline_cmd = f"sudo bash -lc {shlex.quote(inline_body)}"
+        _run_ssh(server, inline_cmd, timeout=max(0.5, float(timeout)))
+
     no_restart_arg = "" if restart else " --no-restart"
     cmd = f"sudo {shlex.quote(server.remote_remove_script)} --uuid {shlex.quote(client_uuid)}{no_restart_arg}"
     try:
@@ -2042,6 +2088,14 @@ def remove_vless_client(
             fallback = f"sudo {shlex.quote(server.remote_remove_script)} --uuid {shlex.quote(client_uuid)}"
             _run_ssh(server, fallback, timeout=max(0.5, float(timeout)))
             return True
+        if (not _looks_like_ssh_auth_error(err_text)) and _looks_like_remote_remove_script_error(err_text):
+            try:
+                _remove_vless_client_inline_fallback()
+                if restart:
+                    restart_server_service(server, timeout=min(float(timeout), 30.0), no_block=False)
+                return bool(restart)
+            except Exception as fallback_exc:
+                raise VPNProvisionError(f"{exc}; inline fallback failed: {fallback_exc}") from fallback_exc
         raise
 
 
@@ -2153,7 +2207,7 @@ def _remove_active_configs_remotely_grouped(
                 restart_done_by_script = restart_done_by_script or bool(restarted)
                 removed_on_server.append(cfg)
             except Exception as exc:
-                errors.append(f"cfg#{int(cfg.id)}: {exc}")
+                errors.append(f"cfg#{int(cfg.id)}@{server.name}: {exc}")
 
         if not removed_on_server:
             continue
