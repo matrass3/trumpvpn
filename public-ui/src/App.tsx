@@ -79,12 +79,12 @@ declare global {
 }
 
 const NAV: Array<{ key: CabinetSection; title: string; icon: string }> = [
-  { key: "dashboard", title: "Home", icon: "home" },
-  { key: "subscription", title: "Subscription", icon: "sparkle" },
-  { key: "balance", title: "Balance", icon: "wallet" },
-  { key: "referrals", title: "Referrals", icon: "users" },
-  { key: "giveaways", title: "Fortune", icon: "gift" },
-  { key: "help", title: "Help", icon: "help" },
+  { key: "dashboard", title: "Home", icon: "🏠" },
+  { key: "subscription", title: "Subscription", icon: "✨" },
+  { key: "balance", title: "Balance", icon: "💳" },
+  { key: "referrals", title: "Referrals", icon: "👥" },
+  { key: "giveaways", title: "Fortune", icon: "🎁" },
+  { key: "help", title: "Help", icon: "❓" },
 ];
 
 const GATEWAYS = [
@@ -203,6 +203,25 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+function trackEvent(event: string, meta: Record<string, unknown> = {}) {
+  void fetch("/api/public/analytics/event", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ event, meta }),
+  }).catch(() => undefined);
+}
+
+function shouldStopMiniAppRetry(errorMessage: string) {
+  const text = String(errorMessage || "").toLowerCase();
+  return (
+    text.includes("signature mismatch") ||
+    text.includes("expired") ||
+    text.includes("invalid init_data") ||
+    text.includes("telegram user not found")
+  );
+}
+
 function usePublicConfig() {
   const [config, setConfig] = useState<PublicConfig>({
     bot_url: "https://t.me/trumpvlessbot",
@@ -303,6 +322,9 @@ function CabinetPage() {
   const noticeSeq = useRef(0);
   const previousSnapshot = useRef<CabinetSnapshot | null>(null);
   const expiryMarker = useRef("");
+  const authRetryAttempt = useRef(0);
+  const authRetryTimer = useRef<number | null>(null);
+  const authRetryStopped = useRef(false);
 
   const pushNotice = useCallback((kind: NoticeKind, body: string, title?: string) => {
     const id = ++noticeSeq.current;
@@ -382,6 +404,7 @@ function CabinetPage() {
         const beforeStatus = prevStatus.get(payment.invoice_id);
         if (currentStatus === "paid" && beforeStatus && beforeStatus !== "paid") {
           pushNotice("success", `Payment #${payment.invoice_id} confirmed: ${fmtRub(payment.amount_rub)}`, "Payment");
+          trackEvent("invoice_paid", { invoice_id: payment.invoice_id, amount_rub: payment.amount_rub, source: "snapshot_diff" });
           triggerNotify("success");
         }
       }
@@ -426,6 +449,8 @@ function CabinetPage() {
         setMiniAppAuthError("");
         await apiJson("/api/public/auth/miniapp", { method: "POST", body: JSON.stringify({ init_data: initData }) });
         await refresh();
+        authRetryAttempt.current = 0;
+        authRetryStopped.current = false;
         if (!silent) {
           pushNotice("success", "Logged in via Telegram Mini App.", "Telegram");
           triggerNotify("success");
@@ -434,6 +459,9 @@ function CabinetPage() {
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Mini App auth failed";
         setMiniAppAuthError(msg);
+        if (shouldStopMiniAppRetry(msg)) {
+          authRetryStopped.current = true;
+        }
         if (!silent) {
           pushNotice("warn", msg, "Telegram");
         }
@@ -446,24 +474,40 @@ function CabinetPage() {
   );
 
   useEffect(() => {
-    if (!unauthorized || miniAppAuthPending) return;
+    if (!unauthorized || miniAppAuthPending || authRetryStopped.current) return;
     let cancelled = false;
+
     const run = async (silent = true) => {
       const initData = getTelegramMiniAppInitData();
       if (!initData) {
         setMiniAppAuthError("Open this cabinet from Telegram bot menu. Mini App init data is missing.");
+        authRetryStopped.current = true;
         return false;
       }
-      return loginWithMiniApp(initData, silent);
+      const ok = await loginWithMiniApp(initData, silent);
+      if (ok || authRetryStopped.current || cancelled) return ok;
+      authRetryAttempt.current += 1;
+      if (authRetryAttempt.current > 7) {
+        authRetryStopped.current = true;
+        return false;
+      }
+      const delayMs = Math.min(15000, 500 * 2 ** authRetryAttempt.current);
+      authRetryTimer.current = window.setTimeout(() => {
+        if (!cancelled) {
+          void run(true);
+        }
+      }, delayMs);
+      return false;
     };
+
     void run(true);
-    const timer = window.setInterval(() => {
-      if (cancelled) return;
-      void run(true);
-    }, 1800);
+
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (authRetryTimer.current) {
+        window.clearTimeout(authRetryTimer.current);
+        authRetryTimer.current = null;
+      }
     };
   }, [unauthorized, miniAppAuthPending, loginWithMiniApp]);
 
@@ -475,6 +519,8 @@ function CabinetPage() {
       setShowNotifications(false);
       setNotifications([]);
       setToasts([]);
+      authRetryAttempt.current = 0;
+      authRetryStopped.current = false;
       navigate("dashboard");
     });
   }
@@ -482,6 +528,7 @@ function CabinetPage() {
   async function renewFromBalance() {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/renew-from-balance", { method: "POST" });
+      trackEvent("renew_from_balance");
       pushNotice("success", "Subscription renewed.");
       triggerNotify("success");
     });
@@ -490,6 +537,7 @@ function CabinetPage() {
   async function claimWelcome() {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/welcome/claim", { method: "POST" });
+      trackEvent("welcome_bonus_claimed");
       pushNotice("success", "Welcome bonus processed.");
       triggerNotify("success");
     });
@@ -500,6 +548,7 @@ function CabinetPage() {
     await withAction(async () => {
       if (!promoCode.trim()) throw new Error("Enter promo code");
       await apiJson("/api/public/cabinet/promo/apply", { method: "POST", body: JSON.stringify({ code: promoCode.trim() }) });
+      trackEvent("promo_applied", { code: promoCode.trim() });
       setPromoCode("");
       pushNotice("success", "Promo applied.");
       triggerNotify("success");
@@ -516,6 +565,7 @@ function CabinetPage() {
       });
       setCreatedInvoice(result);
       setInvoiceToCheck(result.invoice_id);
+      trackEvent("invoice_created", { invoice_id: result.invoice_id, amount_rub: Number(topupAmount || 0), gateway: topupGateway });
       pushNotice("info", `Invoice #${result.invoice_id} created.`);
     });
   }
@@ -528,6 +578,11 @@ function CabinetPage() {
         method: "POST",
         body: JSON.stringify({ invoice_id: id }),
       });
+      const statusValue = String(result.status || "").toLowerCase();
+      trackEvent("invoice_checked", { invoice_id: id, status: statusValue });
+      if (statusValue === "paid") {
+        trackEvent("invoice_paid", { invoice_id: id, source: "manual_check" });
+      }
       pushNotice("info", `Invoice #${id}: ${result.status}`);
     });
   }
@@ -535,6 +590,7 @@ function CabinetPage() {
   async function buyPlan(planId: string) {
     triggerImpact("medium");
     await withAction(async () => {
+      trackEvent("plan_purchase_requested", { plan_id: planId });
       await apiJson("/api/public/cabinet/purchase-plan", { method: "POST", body: JSON.stringify({ plan_id: planId }) });
       pushNotice("success", "Plan purchased.");
       triggerNotify("success");
@@ -544,6 +600,7 @@ function CabinetPage() {
   async function joinGiveaway(giveawayId: number) {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/giveaways/join", { method: "POST", body: JSON.stringify({ giveaway_id: giveawayId }) });
+      trackEvent("giveaway_joined", { giveaway_id: giveawayId });
       pushNotice("success", "You joined the giveaway.");
       triggerNotify("success");
     });
@@ -551,8 +608,12 @@ function CabinetPage() {
 
   async function doRevokeConfig(configId: number) {
     await withAction(async () => {
-      await apiJson("/api/public/cabinet/configs/revoke", { method: "POST", body: JSON.stringify({ config_id: configId }) });
-      pushNotice("success", "Device access revoked.");
+      const result = await apiJson<{ status: string; revoked_count?: number }>("/api/public/cabinet/configs/revoke", {
+        method: "POST",
+        body: JSON.stringify({ config_id: configId }),
+      });
+      trackEvent("device_revoked", { config_id: configId, revoked_count: result.revoked_count || 0 });
+      pushNotice("success", `Device access revoked (${result.revoked_count || 0}).`);
       triggerNotify("success");
     });
   }
@@ -561,6 +622,7 @@ function CabinetPage() {
     triggerImpact("light");
     try {
       await navigator.clipboard.writeText(value);
+      trackEvent("copy_text", { size: String(value || "").length });
       pushNotice("success", "Copied.");
       triggerNotify("success");
     } catch {
@@ -585,6 +647,10 @@ function CabinetPage() {
     });
   }, [activeConfigs, deviceFilter, protocolFilter]);
   const paidPaymentsCount = useMemo(() => snapshot?.payments.filter((p) => String(p.status || "").toLowerCase() === "paid").length || 0, [snapshot]);
+  const revokeTargetsCount = useMemo(() => {
+    if (!revokeCandidate) return 0;
+    return activeConfigs.filter((cfg) => cfg.device_name === revokeCandidate.device_name).length;
+  }, [activeConfigs, revokeCandidate]);
 
   return (
     <main className="cabinet-root">
@@ -647,6 +713,8 @@ function CabinetPage() {
                 type="button"
                 onClick={() => {
                   const initData = getTelegramMiniAppInitData();
+                  authRetryStopped.current = false;
+                  authRetryAttempt.current = 0;
                   void loginWithMiniApp(initData, false);
                 }}
                 disabled={miniAppAuthPending}
@@ -866,7 +934,10 @@ function CabinetPage() {
                           href={createdInvoice.pay_url}
                           target="_blank"
                           rel="noreferrer noopener"
-                          onClick={() => triggerImpact("medium")}
+                          onClick={() => {
+                            triggerImpact("medium");
+                            trackEvent("pay_link_opened", { invoice_id: createdInvoice.invoice_id });
+                          }}
                         >
                           Open payment link
                         </a>
@@ -999,7 +1070,7 @@ function CabinetPage() {
           <div className="modal-card panel">
             <h3>Remove device access?</h3>
             <p>
-              Device <strong>{revokeCandidate.device_name}</strong> on <strong>{revokeCandidate.server_name}</strong> will be revoked.
+              Device <strong>{revokeCandidate.device_name}</strong> will be revoked on <strong>{revokeTargetsCount}</strong> server(s).
             </p>
             <div className="action-row">
               <button className="ui-btn ghost" type="button" onClick={() => setRevokeCandidate(null)} disabled={actionPending}>
@@ -1048,6 +1119,7 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
     triggerImpact("light");
     try {
       await navigator.clipboard.writeText(url);
+      trackEvent("copy_subscription_url", { size: String(url || "").length });
       setCopied(true);
       triggerNotify("success");
       window.setTimeout(() => setCopied(false), 1200);
@@ -1090,6 +1162,22 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
                 <a className="ui-btn ghost" href={data.links.stats_url}>
                   Refresh
                 </a>
+                <a className="ui-btn ghost" href={data.links.raw_url}>
+                  Raw
+                </a>
+                <a className="ui-btn ghost" href={data.links.b64_url}>
+                  Base64
+                </a>
+                {data.links.happ_import_url ? (
+                  <a className="ui-btn ghost" href={data.links.happ_import_url}>
+                    Open in HApp
+                  </a>
+                ) : null}
+                {data.links.happ_download_url ? (
+                  <a className="ui-btn ghost" href={data.links.happ_download_url} target="_blank" rel="noreferrer noopener">
+                    Download HApp
+                  </a>
+                ) : null}
               </div>
               <pre className="url-box">{data.links.subscription_url}</pre>
             </section>

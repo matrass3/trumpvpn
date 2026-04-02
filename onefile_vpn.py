@@ -620,6 +620,11 @@ class TelegramMiniAppAuthRequest(BaseModel):
     init_data: str = Field(min_length=10, max_length=8192)
 
 
+class PublicAnalyticsEventRequest(BaseModel):
+    event: str = Field(min_length=2, max_length=64)
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
 def require_internal_token(x_internal_token: str = Header(default="")) -> None:
     if x_internal_token != settings.internal_api_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal token")
@@ -3168,6 +3173,35 @@ def public_auth_miniapp(
 @app.post("/api/public/auth/logout")
 def public_auth_logout(response: Response):
     _clear_public_user_cookie(response)
+    return {"ok": True}
+
+
+@app.post("/api/public/analytics/event")
+def public_analytics_event(payload: PublicAnalyticsEventRequest, request: Request, db: Session = Depends(get_db)):
+    user: User | None = None
+    try:
+        user = _public_user_from_request(request, db)
+    except HTTPException:
+        user = None
+    remote_addr = str(getattr(getattr(request, "client", None), "host", "") or "")
+    details = {
+        "event": str(payload.event or "")[:64],
+        "meta": payload.meta if isinstance(payload.meta, dict) else {},
+        "telegram_id": int(user.telegram_id) if user else 0,
+        "ua": str(request.headers.get("user-agent", "") or "")[:255],
+    }
+    db.add(
+        AdminAuditLog(
+            admin_telegram_id=int(settings.admin_telegram_id or 0),
+            action="public_event",
+            entity_type="public_ui",
+            entity_id=str(int(user.telegram_id) if user else ""),
+            request_path=str(getattr(getattr(request, "url", None), "path", "") or "")[:255],
+            remote_addr=remote_addr[:64],
+            details_json=json.dumps(details, ensure_ascii=False),
+        )
+    )
+    db.commit()
     return {"ok": True}
 
 
