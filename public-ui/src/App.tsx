@@ -1,9 +1,20 @@
-﻿import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./styles.css";
 
 type PublicConfig = { bot_url: string; brand: string; bot_username?: string; support_url?: string };
 type TelegramAuthPayload = { id: number; username?: string; auth_date: number; hash: string };
-type CabinetSection = "dashboard" | "subscription" | "balance" | "referrals" | "giveaways";
+type CabinetSection = "dashboard" | "subscription" | "balance" | "referrals" | "giveaways" | "help";
+type NoticeKind = "info" | "success" | "warn" | "error";
+
+type CabinetConfig = {
+  id: number;
+  server_name: string;
+  protocol: string;
+  device_name: string;
+  vless_url: string;
+  is_active: boolean;
+  created_at: string;
+};
 
 type CabinetSnapshot = {
   user: {
@@ -15,15 +26,7 @@ type CabinetSnapshot = {
     subscription_active: boolean;
     invited_count: number;
     referral_bonus_rub: number;
-    configs: Array<{
-      id: number;
-      server_name: string;
-      protocol: string;
-      device_name: string;
-      vless_url: string;
-      is_active: boolean;
-      created_at: string;
-    }>;
+    configs: CabinetConfig[];
   };
   plans: Array<{ id: string; label: string; months: number; price_rub: number; badge: string; days: number }>;
   payment: { min_topup_rub: number; max_topup_rub: number };
@@ -50,6 +53,15 @@ type SubscriptionPreview = {
   };
 };
 
+type AppNotice = {
+  id: number;
+  kind: NoticeKind;
+  title: string;
+  body: string;
+  read: boolean;
+  created_at: number;
+};
+
 declare global {
   interface Window {
     onTelegramAuth?: (user: TelegramAuthPayload) => void;
@@ -58,17 +70,23 @@ declare global {
         initData?: string;
         ready?: () => void;
         expand?: () => void;
+        HapticFeedback?: {
+          impactOccurred?: (style: "light" | "medium" | "heavy" | "rigid" | "soft") => void;
+          notificationOccurred?: (kind: "error" | "success" | "warning") => void;
+          selectionChanged?: () => void;
+        };
       };
     };
   }
 }
 
 const NAV: Array<{ key: CabinetSection; title: string; icon: string }> = [
-  { key: "dashboard", title: "Dashboard", icon: "home" },
+  { key: "dashboard", title: "Home", icon: "home" },
   { key: "subscription", title: "Subscription", icon: "sparkle" },
   { key: "balance", title: "Balance", icon: "wallet" },
   { key: "referrals", title: "Referrals", icon: "users" },
   { key: "giveaways", title: "Fortune", icon: "gift" },
+  { key: "help", title: "Help", icon: "help" },
 ];
 
 const GATEWAYS = [
@@ -123,7 +141,7 @@ function sectionFromPath(pathname: string): CabinetSection {
   if (raw === "overview") return "dashboard";
   if (raw === "plans") return "subscription";
   if (raw === "account") return "referrals";
-  if (raw === "dashboard" || raw === "subscription" || raw === "balance" || raw === "referrals" || raw === "giveaways") return raw;
+  if (raw === "dashboard" || raw === "subscription" || raw === "balance" || raw === "referrals" || raw === "giveaways" || raw === "help") return raw;
   return "dashboard";
 }
 
@@ -136,6 +154,39 @@ function planLabel(plan: { label: string; months: number; days: number }) {
   if (m === 6) return "6 months";
   if (m === 12) return "1 year";
   return `${m} months`;
+}
+
+function triggerImpact(style: "light" | "medium" | "heavy" = "light") {
+  window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.(style);
+}
+
+function triggerNotify(kind: "error" | "success" | "warning") {
+  window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.(kind);
+}
+
+function extractRawQueryParam(name: string): string {
+  const query = window.location.search.startsWith("?") ? window.location.search.slice(1) : "";
+  if (!query) return "";
+  const parts = query.split("&");
+  for (const item of parts) {
+    if (!item) continue;
+    const eqPos = item.indexOf("=");
+    const key = eqPos >= 0 ? item.slice(0, eqPos) : item;
+    if (key === name) return eqPos >= 0 ? item.slice(eqPos + 1) : "";
+  }
+  return "";
+}
+
+function getTelegramMiniAppInitData() {
+  const direct = String(window.Telegram?.WebApp?.initData || "").trim();
+  if (direct) return direct;
+  const raw = extractRawQueryParam("tgWebAppData") || extractRawQueryParam("initData");
+  if (!raw) return "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -212,7 +263,7 @@ function LandingPage() {
       <div className="landing-card">
         <p className="landing-kicker">SECURE VPN SERVICE</p>
         <h1>{config.brand}</h1>
-        <p>Fast VPN for phone and desktop. Subscription and balance control in one place.</p>
+        <p>Fast VPN for phone and desktop. Subscription, balance and access keys in one cabinet.</p>
         <div className="landing-actions">
           <a className="ui-btn primary" href="/cabinet">
             Open Cabinet
@@ -225,14 +276,42 @@ function LandingPage() {
     </main>
   );
 }
+
+function SkeletonCabinet() {
+  return (
+    <section className="stack">
+      <article className="panel skeleton-panel">
+        <div className="skeleton skeleton-title" />
+        <div className="skeleton skeleton-line" />
+      </article>
+      <article className="panel skeleton-panel">
+        <div className="skeleton-grid">
+          <div className="skeleton skeleton-stat" />
+          <div className="skeleton skeleton-stat" />
+          <div className="skeleton skeleton-stat" />
+        </div>
+      </article>
+      <article className="panel skeleton-panel">
+        <div className="skeleton skeleton-line" />
+        <div className="skeleton skeleton-line short" />
+      </article>
+    </section>
+  );
+}
+
+function noticeTitleByKind(kind: NoticeKind) {
+  if (kind === "success") return "Success";
+  if (kind === "warn") return "Warning";
+  if (kind === "error") return "Error";
+  return "Info";
+}
+
 function CabinetPage() {
   const config = usePublicConfig();
   const [section, setSection] = useState<CabinetSection>(() => sectionFromPath(window.location.pathname));
   const [snapshot, setSnapshot] = useState<CabinetSnapshot | null>(null);
   const [pending, setPending] = useState(true);
   const [unauthorized, setUnauthorized] = useState(false);
-  const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
   const [actionPending, setActionPending] = useState(false);
   const [topupAmount, setTopupAmount] = useState(500);
   const [topupGateway, setTopupGateway] = useState("cryptopay");
@@ -240,6 +319,35 @@ function CabinetPage() {
   const [invoiceToCheck, setInvoiceToCheck] = useState(0);
   const [createdInvoice, setCreatedInvoice] = useState<{ invoice_id: number; pay_url: string } | null>(null);
   const [miniAppAuthTried, setMiniAppAuthTried] = useState(false);
+  const [miniAppAuthPending, setMiniAppAuthPending] = useState(false);
+  const [notifications, setNotifications] = useState<AppNotice[]>([]);
+  const [toasts, setToasts] = useState<AppNotice[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [deviceFilter, setDeviceFilter] = useState("");
+  const [protocolFilter, setProtocolFilter] = useState("all");
+  const [revokeCandidate, setRevokeCandidate] = useState<CabinetConfig | null>(null);
+  const noticeSeq = useRef(0);
+  const previousSnapshot = useRef<CabinetSnapshot | null>(null);
+  const expiryMarker = useRef("");
+
+  const pushNotice = useCallback((kind: NoticeKind, body: string, title?: string) => {
+    const id = ++noticeSeq.current;
+    const entry: AppNotice = {
+      id,
+      kind,
+      title: title || noticeTitleByKind(kind),
+      body,
+      read: false,
+      created_at: Date.now(),
+    };
+    setNotifications((prev) => [entry, ...prev].slice(0, 30));
+    setToasts((prev) => [entry, ...prev].slice(0, 3));
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((item) => item.id !== id));
+    }, 4200);
+  }, []);
+
+  const unreadNotifications = useMemo(() => notifications.filter((item) => !item.read).length, [notifications]);
 
   useEffect(() => {
     const onPop = () => setSection(sectionFromPath(window.location.pathname));
@@ -247,9 +355,27 @@ function CabinetPage() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  useEffect(() => {
+    if (!showNotifications) return;
+    setNotifications((prev) => prev.map((item) => ({ ...item, read: true })));
+  }, [showNotifications]);
+
+  useEffect(() => {
+    const onReady = () => {
+      window.Telegram?.WebApp?.ready?.();
+      window.Telegram?.WebApp?.expand?.();
+    };
+    onReady();
+    if (window.Telegram?.WebApp) return;
+    const script = document.createElement("script");
+    script.src = "https://telegram.org/js/telegram-web-app.js";
+    script.async = true;
+    script.onload = onReady;
+    document.head.appendChild(script);
+  }, []);
+
   const refresh = useCallback(async () => {
     setPending(true);
-    setError("");
     try {
       const data = await apiJson<CabinetSnapshot>("/api/public/cabinet");
       setSnapshot(data);
@@ -261,16 +387,41 @@ function CabinetPage() {
         setUnauthorized(true);
         setSnapshot(null);
       } else {
-        setError(msg);
+        pushNotice("error", msg);
       }
     } finally {
       setPending(false);
     }
-  }, [invoiceToCheck]);
+  }, [invoiceToCheck, pushNotice]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    const prev = previousSnapshot.current;
+    if (prev) {
+      const prevStatus = new Map(prev.payments.map((item) => [item.invoice_id, String(item.status || "").toLowerCase()]));
+      for (const payment of snapshot.payments) {
+        const currentStatus = String(payment.status || "").toLowerCase();
+        const beforeStatus = prevStatus.get(payment.invoice_id);
+        if (currentStatus === "paid" && beforeStatus && beforeStatus !== "paid") {
+          pushNotice("success", `Payment #${payment.invoice_id} confirmed: ${fmtRub(payment.amount_rub)}`, "Payment");
+          triggerNotify("success");
+        }
+      }
+    }
+    const daysLeft = getDaysLeft(snapshot.user.subscription_until);
+    if (snapshot.user.subscription_active && daysLeft > 0 && daysLeft <= 3) {
+      const marker = `${snapshot.user.subscription_until || ""}:${daysLeft}`;
+      if (expiryMarker.current !== marker) {
+        expiryMarker.current = marker;
+        pushNotice("warn", `Subscription expires in ${daysLeft} day(s).`, "Subscription");
+      }
+    }
+    previousSnapshot.current = snapshot;
+  }, [snapshot, pushNotice]);
 
   const navigate = useCallback((next: CabinetSection) => {
     const nextPath = pathFromSection(next);
@@ -280,13 +431,13 @@ function CabinetPage() {
 
   async function withAction(action: () => Promise<void>) {
     setActionPending(true);
-    setError("");
-    setMessage("");
     try {
       await action();
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Action failed");
+      const msg = err instanceof Error ? err.message : "Action failed";
+      pushNotice("error", msg);
+      triggerNotify("error");
     } finally {
       setActionPending(false);
     }
@@ -295,24 +446,62 @@ function CabinetPage() {
   async function login(payload: TelegramAuthPayload) {
     await withAction(async () => {
       await apiJson("/api/public/auth/telegram", { method: "POST", body: JSON.stringify(payload) });
-      setMessage("Login successful.");
+      pushNotice("success", "Login successful.");
+      triggerNotify("success");
     });
   }
 
-  async function loginWithMiniApp() {
-    const initData = String(window.Telegram?.WebApp?.initData || "").trim();
-    if (!initData) return;
-    await withAction(async () => {
-      await apiJson("/api/public/auth/miniapp", { method: "POST", body: JSON.stringify({ init_data: initData }) });
-      setMessage("Logged in from Telegram Mini App.");
-    });
-  }
+  const loginWithMiniApp = useCallback(
+    async (initDataRaw: string) => {
+      const initData = String(initDataRaw || "").trim();
+      if (!initData) return false;
+      try {
+        setMiniAppAuthPending(true);
+        await apiJson("/api/public/auth/miniapp", { method: "POST", body: JSON.stringify({ init_data: initData }) });
+        await refresh();
+        pushNotice("success", "Logged in via Telegram Mini App.", "Telegram");
+        triggerNotify("success");
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Mini App auth failed";
+        pushNotice("warn", msg, "Telegram");
+        return false;
+      } finally {
+        setMiniAppAuthPending(false);
+      }
+    },
+    [pushNotice, refresh]
+  );
+
+  useEffect(() => {
+    if (!unauthorized || miniAppAuthTried || miniAppAuthPending) return;
+    let cancelled = false;
+    let attempts = 0;
+    const run = async () => {
+      if (cancelled) return;
+      const initData = getTelegramMiniAppInitData();
+      if (!initData) {
+        attempts += 1;
+        if (attempts < 12) window.setTimeout(run, 250);
+        return;
+      }
+      setMiniAppAuthTried(true);
+      await loginWithMiniApp(initData);
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [unauthorized, miniAppAuthTried, miniAppAuthPending, loginWithMiniApp]);
 
   async function logout() {
     await withAction(async () => {
       await apiJson("/api/public/auth/logout", { method: "POST" });
       setUnauthorized(true);
       setSnapshot(null);
+      setShowNotifications(false);
+      setNotifications([]);
+      setToasts([]);
       navigate("dashboard");
     });
   }
@@ -320,14 +509,16 @@ function CabinetPage() {
   async function renewFromBalance() {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/renew-from-balance", { method: "POST" });
-      setMessage("Subscription renewed.");
+      pushNotice("success", "Subscription renewed.");
+      triggerNotify("success");
     });
   }
 
   async function claimWelcome() {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/welcome/claim", { method: "POST" });
-      setMessage("Welcome bonus processed.");
+      pushNotice("success", "Welcome bonus processed.");
+      triggerNotify("success");
     });
   }
 
@@ -337,12 +528,14 @@ function CabinetPage() {
       if (!promoCode.trim()) throw new Error("Enter promo code");
       await apiJson("/api/public/cabinet/promo/apply", { method: "POST", body: JSON.stringify({ code: promoCode.trim() }) });
       setPromoCode("");
-      setMessage("Promo applied.");
+      pushNotice("success", "Promo applied.");
+      triggerNotify("success");
     });
   }
 
   async function createInvoice(event: FormEvent) {
     event.preventDefault();
+    triggerImpact("medium");
     await withAction(async () => {
       const result = await apiJson<{ invoice_id: number; pay_url: string }>("/api/public/cabinet/payments/create", {
         method: "POST",
@@ -350,7 +543,7 @@ function CabinetPage() {
       });
       setCreatedInvoice(result);
       setInvoiceToCheck(result.invoice_id);
-      setMessage(`Invoice #${result.invoice_id} created.`);
+      pushNotice("info", `Invoice #${result.invoice_id} created.`);
     });
   }
 
@@ -362,37 +555,44 @@ function CabinetPage() {
         method: "POST",
         body: JSON.stringify({ invoice_id: id }),
       });
-      setMessage(`Invoice #${id}: ${result.status}`);
+      pushNotice("info", `Invoice #${id}: ${result.status}`);
     });
   }
 
   async function buyPlan(planId: string) {
+    triggerImpact("medium");
     await withAction(async () => {
       await apiJson("/api/public/cabinet/purchase-plan", { method: "POST", body: JSON.stringify({ plan_id: planId }) });
-      setMessage("Plan purchased.");
+      pushNotice("success", "Plan purchased.");
+      triggerNotify("success");
     });
   }
 
   async function joinGiveaway(giveawayId: number) {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/giveaways/join", { method: "POST", body: JSON.stringify({ giveaway_id: giveawayId }) });
-      setMessage("You joined the giveaway.");
+      pushNotice("success", "You joined the giveaway.");
+      triggerNotify("success");
     });
   }
 
-  async function revokeConfig(configId: number) {
+  async function doRevokeConfig(configId: number) {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/configs/revoke", { method: "POST", body: JSON.stringify({ config_id: configId }) });
-      setMessage("Config revoked.");
+      pushNotice("success", "Device access revoked.");
+      triggerNotify("success");
     });
   }
 
   async function copyText(value: string) {
+    triggerImpact("light");
     try {
       await navigator.clipboard.writeText(value);
-      setMessage("Copied.");
+      pushNotice("success", "Copied.");
+      triggerNotify("success");
     } catch {
-      setError("Copy failed");
+      pushNotice("error", "Copy failed");
+      triggerNotify("error");
     }
   }
 
@@ -401,50 +601,75 @@ function CabinetPage() {
   const botRefLink = `${config.bot_url}?start=ref${snapshot?.user.telegram_id || ""}`;
   const cabinetRefLink = `${window.location.origin}/cabinet?ref=${snapshot?.user.telegram_id || ""}`;
   const activeConfigs = (snapshot?.user.configs || []).filter((cfg) => cfg.is_active);
-
-  useEffect(() => {
-    if (!unauthorized || miniAppAuthTried) return;
-    const initData = String(window.Telegram?.WebApp?.initData || "").trim();
-    if (!initData) return;
-    setMiniAppAuthTried(true);
-    void loginWithMiniApp();
-  }, [miniAppAuthTried, unauthorized]);
-
-  useEffect(() => {
-    window.Telegram?.WebApp?.ready?.();
-    window.Telegram?.WebApp?.expand?.();
-  }, []);
+  const protocolOptions = useMemo(() => Array.from(new Set(activeConfigs.map((cfg) => String(cfg.protocol || "").toLowerCase()))).sort(), [activeConfigs]);
+  const filteredConfigs = useMemo(() => {
+    const q = deviceFilter.trim().toLowerCase();
+    return activeConfigs.filter((cfg) => {
+      if (protocolFilter !== "all" && String(cfg.protocol || "").toLowerCase() !== protocolFilter) return false;
+      if (!q) return true;
+      const hay = `${cfg.device_name} ${cfg.server_name} ${cfg.protocol}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [activeConfigs, deviceFilter, protocolFilter]);
+  const paidPaymentsCount = useMemo(() => snapshot?.payments.filter((p) => String(p.status || "").toLowerCase() === "paid").length || 0, [snapshot]);
 
   return (
     <main className="cabinet-root">
       <div className="mobile-shell">
-        <header className="mobile-topbar">
-          <button className="chip-btn" type="button" onClick={() => window.history.back()}>
-            Close
-          </button>
+        <header className="mobile-topbar compact">
           <div className="mobile-brand">{config.brand}</div>
           <div className="top-actions">
-            <a className="chip-btn" href={config.support_url || "https://t.me/trumpvpnhelp"} target="_blank" rel="noreferrer noopener">
-              Help
-            </a>
-            <button className="chip-btn" type="button" onClick={() => void refresh()}>
-              Reload
+            <button className="chip-btn notif-btn" type="button" onClick={() => setShowNotifications((prev) => !prev)} aria-label="Notifications">
+              Alerts
+              {unreadNotifications > 0 ? <span className="badge">{unreadNotifications}</span> : null}
             </button>
+            {snapshot ? (
+              <button className="chip-btn" type="button" onClick={() => void logout()} disabled={actionPending}>
+                Logout
+              </button>
+            ) : null}
           </div>
         </header>
 
-        {message ? <div className="toast ok">{message}</div> : null}
-        {error ? <div className="toast err">{error}</div> : null}
+        <div className="toasts">
+          {toasts.map((item) => (
+            <div key={item.id} className={`toast ${item.kind === "error" ? "err" : item.kind === "warn" ? "warn" : "ok"}`}>
+              <strong>{item.title}</strong>
+              <span>{item.body}</span>
+            </div>
+          ))}
+        </div>
+
+        {showNotifications ? (
+          <section className="panel notifications-panel">
+            <div className="panel-head">
+              <h3>Notifications</h3>
+              <button className="chip-btn" type="button" onClick={() => setNotifications([])}>
+                Clear
+              </button>
+            </div>
+            <div className="notifications-list">
+              {notifications.map((item) => (
+                <article key={item.id} className={`notification-item ${item.read ? "read" : ""}`}>
+                  <div className="notification-title">{item.title}</div>
+                  <div className="notification-body">{item.body}</div>
+                  <time>{new Date(item.created_at).toLocaleTimeString("ru-RU")}</time>
+                </article>
+              ))}
+              {!notifications.length ? <div className="empty">No notifications.</div> : null}
+            </div>
+          </section>
+        ) : null}
 
         {!pending && unauthorized ? (
           <section className="panel">
             <h2>Login via Telegram</h2>
-            <p>Use secure Telegram auth.</p>
-            <TelegramLoginButton botUsername={String(config.bot_username || "trumpvlessbot")} onAuth={(payload) => void login(payload)} />
+            <p>{miniAppAuthPending ? "Authorizing via Telegram Mini App..." : "Use secure Telegram auth."}</p>
+            {!miniAppAuthPending ? <TelegramLoginButton botUsername={String(config.bot_username || "trumpvlessbot")} onAuth={(payload) => void login(payload)} /> : null}
           </section>
         ) : null}
 
-        {pending && !snapshot ? <section className="panel">Loading...</section> : null}
+        {pending && !snapshot ? <SkeletonCabinet /> : null}
 
         {snapshot ? (
           <>
@@ -452,11 +677,12 @@ function CabinetPage() {
               <div className="hero-row">
                 <div>
                   <h1>Welcome, {username}!</h1>
-                  <p>Your subscription: {snapshot.user.subscription_active ? "Active" : "Inactive"}</p>
+                  <p>{snapshot.user.subscription_active ? `Active until ${fmtDate(snapshot.user.subscription_until)}` : "No active subscription"}</p>
                 </div>
-                <button className="chip-btn" type="button" onClick={() => void logout()} disabled={actionPending}>
-                  Logout
-                </button>
+                <div className="hero-badges">
+                  <span className={`status-pill ${snapshot.user.subscription_active ? "ok" : "off"}`}>{snapshot.user.subscription_active ? "Active" : "Inactive"}</span>
+                  <span className="status-pill neutral">{fmtRub(snapshot.user.balance_rub)}</span>
+                </div>
               </div>
             </section>
 
@@ -471,8 +697,8 @@ function CabinetPage() {
                       <span>days</span>
                     </div>
                     <div>
-                      <strong>{snapshot.user.configs.length}</strong>
-                      <span>configs</span>
+                      <strong>{activeConfigs.length}</strong>
+                      <span>keys</span>
                     </div>
                     <div>
                       <strong>{snapshot.user.invited_count}</strong>
@@ -498,10 +724,10 @@ function CabinetPage() {
                     </button>
                   </article>
                   <article className="panel mini-card">
-                    <h3>Referrals</h3>
-                    <strong>{snapshot.user.invited_count}</strong>
-                    <button className="link-btn" type="button" onClick={() => navigate("referrals")}>
-                      Open referrals
+                    <h3>Payments</h3>
+                    <strong>{paidPaymentsCount}</strong>
+                    <button className="link-btn" type="button" onClick={() => navigate("subscription")}>
+                      Open subscription
                     </button>
                   </article>
                 </div>
@@ -514,19 +740,24 @@ function CabinetPage() {
                         Copy access key
                       </button>
                     ) : null}
-                    <a className="ui-btn ghost" href={config.support_url || "https://t.me/trumpvpnhelp"} target="_blank" rel="noreferrer noopener">
-                      Help
-                    </a>
+                    <button className="ui-btn ghost" type="button" onClick={() => navigate("help")}>
+                      Open help center
+                    </button>
+                    <button className="ui-btn ghost" type="button" onClick={() => void refresh()} disabled={pending || actionPending}>
+                      Refresh data
+                    </button>
                   </div>
                 </article>
               </section>
             ) : null}
+
             {section === "subscription" ? (
               <section className="stack">
                 <article className="panel">
                   <h2>Subscription</h2>
-                  <p>{snapshot.user.subscription_active ? `Active until ${fmtDate(snapshot.user.subscription_until)}` : "You do not have an active subscription"}</p>
+                  <p>{snapshot.user.subscription_active ? `Active until ${fmtDate(snapshot.user.subscription_until)}` : "You do not have an active subscription."}</p>
                 </article>
+
                 <article className="panel plan-list">
                   <h3>Choose plan</h3>
                   {snapshot.plans.map((plan) => (
@@ -535,7 +766,7 @@ function CabinetPage() {
                         <strong>{planLabel(plan)}</strong>
                         <small>{plan.days} days</small>
                       </div>
-                      <div>
+                      <div className="plan-row-actions">
                         <span>{fmtRub(plan.price_rub)}</span>
                         <button className="ui-btn ghost" type="button" onClick={() => void buyPlan(plan.id)} disabled={actionPending}>
                           Buy
@@ -544,27 +775,50 @@ function CabinetPage() {
                     </div>
                   ))}
                 </article>
-                <article className="panel plan-list">
-                  <h3>Access keys</h3>
-                  {activeConfigs.map((cfg) => (
-                    <div key={cfg.id} className="plan-row key-row">
-                      <div>
-                        <strong>
-                          {cfg.server_name} · {cfg.device_name}
-                        </strong>
-                        <small>{cfg.protocol}</small>
-                      </div>
-                      <div className="action-row">
-                        <button className="ui-btn ghost small" type="button" onClick={() => void copyText(cfg.vless_url)}>
-                          Copy key
-                        </button>
-                        <button className="ui-btn ghost small danger" type="button" onClick={() => void revokeConfig(cfg.id)} disabled={actionPending}>
-                          Remove
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  {!activeConfigs.length ? <div className="empty">No active keys.</div> : null}
+
+                <article className="panel">
+                  <div className="panel-head">
+                    <h3>Manage devices</h3>
+                    <small>{filteredConfigs.length} found</small>
+                  </div>
+                  <div className="device-filters">
+                    <input
+                      className="input"
+                      value={deviceFilter}
+                      placeholder="Search by device or server"
+                      onChange={(event) => setDeviceFilter(event.target.value)}
+                    />
+                    <select className="input" value={protocolFilter} onChange={(event) => setProtocolFilter(event.target.value)}>
+                      <option value="all">All protocols</option>
+                      {protocolOptions.map((item) => (
+                        <option key={item} value={item}>
+                          {item.toUpperCase()}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="devices-list">
+                    {filteredConfigs.map((cfg) => (
+                      <article key={cfg.id} className="device-item">
+                        <div>
+                          <strong>{cfg.device_name}</strong>
+                          <small>
+                            {cfg.server_name} · {cfg.protocol.toUpperCase()}
+                          </small>
+                          <small>Created: {fmtDate(cfg.created_at)}</small>
+                        </div>
+                        <div className="action-row">
+                          <button className="ui-btn ghost small" type="button" onClick={() => void copyText(cfg.vless_url)}>
+                            Copy key
+                          </button>
+                          <button className="ui-btn ghost small danger" type="button" onClick={() => setRevokeCandidate(cfg)} disabled={actionPending}>
+                            Remove
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                    {!filteredConfigs.length ? <div className="empty">No active devices match the filter.</div> : null}
+                  </div>
                 </article>
               </section>
             ) : null}
@@ -619,7 +873,13 @@ function CabinetPage() {
                     <div className="invoice-box">
                       <p>Invoice #{createdInvoice.invoice_id}</p>
                       <div className="action-row">
-                        <a className="ui-btn ghost" href={createdInvoice.pay_url} target="_blank" rel="noreferrer noopener">
+                        <a
+                          className="ui-btn ghost"
+                          href={createdInvoice.pay_url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          onClick={() => triggerImpact("medium")}
+                        >
                           Open payment link
                         </a>
                         <button className="ui-btn ghost" type="button" onClick={() => void checkInvoice(createdInvoice.invoice_id)} disabled={actionPending}>
@@ -703,6 +963,37 @@ function CabinetPage() {
               </section>
             ) : null}
 
+            {section === "help" ? (
+              <section className="stack">
+                <article className="panel">
+                  <h2>Help center</h2>
+                  <p>Support, documentation and useful links.</p>
+                  <div className="action-row">
+                    <a className="ui-btn primary" href={config.support_url || "https://t.me/trumpvpnhelp"} target="_blank" rel="noreferrer noopener">
+                      Open support chat
+                    </a>
+                    <a className="ui-btn ghost" href={config.bot_url} target="_blank" rel="noreferrer noopener">
+                      Open Telegram bot
+                    </a>
+                  </div>
+                </article>
+                <article className="panel">
+                  <h3>Quick actions</h3>
+                  <div className="action-row">
+                    <button className="ui-btn ghost" type="button" onClick={() => void copyText(config.support_url || "https://t.me/trumpvpnhelp")}>
+                      Copy support link
+                    </button>
+                    <button className="ui-btn ghost" type="button" onClick={() => void copyText(String(snapshot.user.telegram_id || ""))}>
+                      Copy Telegram ID
+                    </button>
+                    <button className="ui-btn ghost" type="button" onClick={() => void refresh()} disabled={pending || actionPending}>
+                      Refresh data
+                    </button>
+                  </div>
+                </article>
+              </section>
+            ) : null}
+
             <nav className="bottom-nav">
               {NAV.map((item) => (
                 <button key={item.key} type="button" className={`nav-item ${section === item.key ? "active" : ""}`} onClick={() => navigate(item.key)}>
@@ -714,6 +1005,35 @@ function CabinetPage() {
           </>
         ) : null}
       </div>
+
+      {revokeCandidate ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="modal-card panel">
+            <h3>Remove device access?</h3>
+            <p>
+              Device <strong>{revokeCandidate.device_name}</strong> on <strong>{revokeCandidate.server_name}</strong> will be revoked.
+            </p>
+            <div className="action-row">
+              <button className="ui-btn ghost" type="button" onClick={() => setRevokeCandidate(null)} disabled={actionPending}>
+                Cancel
+              </button>
+              <button
+                className="ui-btn ghost danger"
+                type="button"
+                onClick={() => {
+                  triggerImpact("medium");
+                  const id = revokeCandidate.id;
+                  setRevokeCandidate(null);
+                  void doRevokeConfig(id);
+                }}
+                disabled={actionPending}
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -737,9 +1057,11 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
   }, [search, telegramId, token]);
 
   async function copyUrl(url: string) {
+    triggerImpact("light");
     try {
       await navigator.clipboard.writeText(url);
       setCopied(true);
+      triggerNotify("success");
       window.setTimeout(() => setCopied(false), 1200);
     } catch {
       // noop
@@ -753,7 +1075,7 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
           <h1>Subscription</h1>
           <p>Copy URL and import into VPN client.</p>
         </section>
-        {pending ? <section className="panel">Loading...</section> : null}
+        {pending ? <SkeletonCabinet /> : null}
         {error ? <section className="toast err">{error}</section> : null}
         {data ? (
           <>
