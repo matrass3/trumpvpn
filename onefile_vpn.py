@@ -2195,7 +2195,18 @@ def _remove_active_configs_remotely_grouped(
         server = server_map.get(int(server_id))
         if not server:
             for cfg in rows:
-                errors.append(f"cfg#{int(cfg.id)}: server not found")
+                removed_ids.add(int(cfg.id))
+            warnings.append(
+                f"server#{int(server_id)}: server record not found, local revoke only for {len(rows)} config(s)"
+            )
+            continue
+
+        if not bool(server.enabled):
+            for cfg in rows:
+                removed_ids.add(int(cfg.id))
+            warnings.append(
+                f"server#{int(server_id)}@{server.name}: server disabled, local revoke only for {len(rows)} config(s)"
+            )
             continue
 
         removed_on_server: list[ClientConfig] = []
