@@ -5,6 +5,7 @@
         initData?: string;
         ready?: () => void;
         expand?: () => void;
+        openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
         HapticFeedback?: {
           impactOccurred?: (style: "light" | "medium" | "heavy" | "rigid" | "soft") => void;
           notificationOccurred?: (kind: "error" | "success" | "warning") => void;

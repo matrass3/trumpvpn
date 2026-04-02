@@ -68,6 +68,7 @@ declare global {
         initData?: string;
         ready?: () => void;
         expand?: () => void;
+        openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
         HapticFeedback?: {
           impactOccurred?: (style: "light" | "medium" | "heavy" | "rigid" | "soft") => void;
           notificationOccurred?: (kind: "error" | "success" | "warning") => void;
@@ -121,8 +122,30 @@ function getDaysLeft(value: string | null | undefined) {
 }
 
 function sanitizeError(raw: string) {
-  const text = String(raw || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const source = String(raw || "").trim();
+  if (!source) return "Request failed";
+
+  let extracted = source;
+  try {
+    const parsed = JSON.parse(source) as { detail?: unknown; message?: unknown; error?: unknown };
+    if (typeof parsed?.detail === "string" && parsed.detail.trim()) extracted = parsed.detail.trim();
+    else if (typeof parsed?.message === "string" && parsed.message.trim()) extracted = parsed.message.trim();
+    else if (typeof parsed?.error === "string" && parsed.error.trim()) extracted = parsed.error.trim();
+  } catch {
+    extracted = source;
+  }
+
+  const text = extracted.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   if (!text) return "Request failed";
+
+  const insufficient = text.match(/insufficient balance\.?\s*need\s*(\d+)\s*rub,\s*missing\s*(\d+)\s*rub/i);
+  if (insufficient) {
+    const need = Number(insufficient[1] || 0);
+    const missing = Number(insufficient[2] || 0);
+    return `Недостаточно средств: нужно ${fmtRub(need)}, не хватает ${fmtRub(missing)}.`;
+  }
+
+  if (/unauthorized|401/i.test(text)) return "Требуется авторизация в Telegram Mini App.";
   if (/502|504|bad gateway|gateway timeout|gateway time-out/i.test(text)) return "Service is temporarily unavailable. Try again in 20-30 seconds.";
   return text.slice(0, 320);
 }
@@ -160,6 +183,21 @@ function triggerImpact(style: "light" | "medium" | "heavy" = "light") {
 
 function triggerNotify(kind: "error" | "success" | "warning") {
   window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.(kind);
+}
+
+function openPaymentUrl(url: string): boolean {
+  const clean = String(url || "").trim();
+  if (!clean) return false;
+  try {
+    if (window.Telegram?.WebApp?.openLink) {
+      window.Telegram.WebApp.openLink(clean, { try_instant_view: false });
+      return true;
+    }
+  } catch {
+    // Fallback below.
+  }
+  const win = window.open(clean, "_blank", "noopener,noreferrer");
+  return Boolean(win);
 }
 
 function extractRawQueryParam(name: string): string {
@@ -325,6 +363,7 @@ function CabinetPage() {
   const authRetryAttempt = useRef(0);
   const authRetryTimer = useRef<number | null>(null);
   const authRetryStopped = useRef(false);
+  const showNotificationsRef = useRef(false);
 
   const pushNotice = useCallback((kind: NoticeKind, body: string, title?: string) => {
     const id = ++noticeSeq.current;
@@ -337,10 +376,12 @@ function CabinetPage() {
       created_at: Date.now(),
     };
     setNotifications((prev) => [entry, ...prev].slice(0, 30));
-    setToasts((prev) => [entry, ...prev].slice(0, 3));
-    window.setTimeout(() => {
-      setToasts((prev) => prev.filter((item) => item.id !== id));
-    }, 4200);
+    if (!showNotificationsRef.current) {
+      setToasts((prev) => [entry, ...prev].slice(0, 3));
+      window.setTimeout(() => {
+        setToasts((prev) => prev.filter((item) => item.id !== id));
+      }, 4200);
+    }
   }, []);
 
   const unreadNotifications = useMemo(() => notifications.filter((item) => !item.read).length, [notifications]);
@@ -352,8 +393,10 @@ function CabinetPage() {
   }, []);
 
   useEffect(() => {
+    showNotificationsRef.current = showNotifications;
     if (!showNotifications) return;
     setNotifications((prev) => prev.map((item) => ({ ...item, read: true })));
+    setToasts([]);
   }, [showNotifications]);
 
   useEffect(() => {
@@ -566,7 +609,14 @@ function CabinetPage() {
       setCreatedInvoice(result);
       setInvoiceToCheck(result.invoice_id);
       trackEvent("invoice_created", { invoice_id: result.invoice_id, amount_rub: Number(topupAmount || 0), gateway: topupGateway });
-      pushNotice("info", `Invoice #${result.invoice_id} created.`);
+      const opened = openPaymentUrl(result.pay_url);
+      trackEvent("pay_link_opened", { invoice_id: result.invoice_id, source: "auto", opened });
+      if (opened) {
+        pushNotice("success", `Счет #${result.invoice_id} создан. Ссылка оплаты открыта автоматически.`, "Payment");
+        triggerNotify("success");
+      } else {
+        pushNotice("warn", `Счет #${result.invoice_id} создан. Откройте ссылку оплаты вручную.`, "Payment");
+      }
     });
   }
 
@@ -929,18 +979,20 @@ function CabinetPage() {
                     <div className="invoice-box">
                       <p>Invoice #{createdInvoice.invoice_id}</p>
                       <div className="action-row">
-                        <a
+                        <button
                           className="ui-btn ghost"
-                          href={createdInvoice.pay_url}
-                          target="_blank"
-                          rel="noreferrer noopener"
+                          type="button"
                           onClick={() => {
                             triggerImpact("medium");
-                            trackEvent("pay_link_opened", { invoice_id: createdInvoice.invoice_id });
+                            const opened = openPaymentUrl(createdInvoice.pay_url);
+                            trackEvent("pay_link_opened", { invoice_id: createdInvoice.invoice_id, source: "manual", opened });
+                            if (!opened) {
+                              pushNotice("warn", "Не удалось открыть ссылку оплаты автоматически.");
+                            }
                           }}
                         >
                           Open payment link
-                        </a>
+                        </button>
                         <button className="ui-btn ghost" type="button" onClick={() => void checkInvoice(createdInvoice.invoice_id)} disabled={actionPending}>
                           Check status
                         </button>
