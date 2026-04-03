@@ -431,6 +431,8 @@ function CabinetPage() {
   const [quickAmount, setQuickAmount] = useState(500);
   const [fortuneWheelDeg, setFortuneWheelDeg] = useState(0);
   const [fortuneLastPrizeId, setFortuneLastPrizeId] = useState("");
+  const [fortuneEmojiRadius, setFortuneEmojiRadius] = useState(104);
+  const [fortuneMarkRadius, setFortuneMarkRadius] = useState(150);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const noticeSeq = useRef(0);
   const previousSnapshot = useRef<CabinetSnapshot | null>(null);
@@ -978,8 +980,7 @@ function CabinetPage() {
       const winnerId = String(result?.result?.prize_id || "");
       const winnerIndex = Math.max(0, prizes.findIndex((item) => String(item.id || "") === winnerId));
       const segAngle = prizes.length > 0 ? 360 / prizes.length : 360;
-      const centerAngle = -90 + segAngle / 2 + winnerIndex * segAngle;
-      const stopOffset = ((-centerAngle % 360) + 360) % 360;
+      const stopOffset = ((-(winnerIndex * segAngle + segAngle / 2) % 360) + 360) % 360;
       setFortuneWheelDeg((prev) => prev + 5 * 360 + stopOffset);
       setFortuneLastPrizeId(winnerId);
       trackEvent("fortune_spin", { prize_id: winnerId, reward_rub: result?.result?.reward_rub || 0, reward_days: result?.result?.reward_days || 0 });
@@ -1085,7 +1086,6 @@ function CabinetPage() {
   const fortunePrizes = fortune?.prizes || [];
   const fortuneRecent = fortune?.recent || [];
   const fortuneSegCount = Math.max(1, fortunePrizes.length || 1);
-  const fortuneEmojiRadius = 104;
   const fortuneGradient = useMemo(() => {
     if (!fortunePrizes.length) return "conic-gradient(from -90deg, #1f2f4e 0deg 360deg)";
     const seg = 360 / fortunePrizes.length;
@@ -1100,6 +1100,21 @@ function CabinetPage() {
     if (!fortuneLastPrizeId) return null;
     return fortunePrizes.find((item) => String(item.id || "") === fortuneLastPrizeId) || null;
   }, [fortunePrizes, fortuneLastPrizeId]);
+  const fortuneWheelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const update = () => {
+      const node = fortuneWheelRef.current;
+      if (!node) return;
+      const size = node.getBoundingClientRect().width || 0;
+      if (size <= 0) return;
+      setFortuneEmojiRadius(Math.max(90, size * 0.33));
+      setFortuneMarkRadius(Math.max(110, size * 0.5 - 8));
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
   return (
     <main className="cabinet-root">
@@ -1468,7 +1483,11 @@ function CabinetPage() {
                 <article className="panel fortune-panel">
                   <div className="fortune-wheel-wrap">
                     <div className="fortune-pointer" />
-                    <div className="fortune-wheel" style={{ backgroundImage: fortuneGradient, transform: `rotate(${fortuneWheelDeg}deg)` }}>
+                    <div
+                      ref={fortuneWheelRef}
+                      className="fortune-wheel"
+                      style={{ backgroundImage: fortuneGradient, transform: `rotate(${fortuneWheelDeg}deg)` }}
+                    >
                       {fortunePrizes.map((item, idx) => {
                         const segAngle = 360 / fortuneSegCount;
                         const angle = -90 + idx * segAngle + segAngle / 2;
@@ -1486,7 +1505,10 @@ function CabinetPage() {
                         <span
                           key={idx}
                           className="fortune-mark"
-                          style={{ transform: `rotate(${-90 + (360 / fortuneSegCount) * idx}deg)` }}
+                          style={{
+                            transform: `rotate(${-90 + (360 / fortuneSegCount) * idx}deg)`,
+                            transformOrigin: `center ${fortuneMarkRadius}px`,
+                          }}
                         />
                       ))}
                     </div>
