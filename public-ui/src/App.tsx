@@ -23,6 +23,7 @@ type CabinetSnapshot = {
     pending_discount_promo_id: number | null;
     subscription_until: string | null;
     subscription_active: boolean;
+    subscription_url?: string;
     invited_count: number;
     referral_bonus_rub: number;
     configs: CabinetConfig[];
@@ -63,12 +64,12 @@ type AppNotice = {
 };
 
 const NAV: Array<{ key: CabinetSection; title: string; icon: string }> = [
-  { key: "dashboard", title: "Home", icon: "HOME" },
-  { key: "subscription", title: "Subscription", icon: "SUB" },
-  { key: "balance", title: "Balance", icon: "WALLET" },
-  { key: "referrals", title: "Referrals", icon: "USERS" },
-  { key: "giveaways", title: "Fortune", icon: "GIFT" },
-  { key: "help", title: "Help", icon: "HELP" },
+  { key: "dashboard", title: "Home", icon: "🏠" },
+  { key: "subscription", title: "Subscription", icon: "✨" },
+  { key: "balance", title: "Balance", icon: "💳" },
+  { key: "referrals", title: "Referrals", icon: "👥" },
+  { key: "giveaways", title: "Fortune", icon: "🎁" },
+  { key: "help", title: "Help", icon: "❓" },
 ];
 
 const GATEWAYS = [
@@ -958,6 +959,7 @@ function CabinetPage() {
 
   const username = snapshot?.user.username || `id${snapshot?.user.telegram_id || ""}`;
   const daysLeft = getDaysLeft(snapshot?.user.subscription_until);
+  const accessLink = String(snapshot?.user.subscription_url || "").trim();
   const botRefLink = `${config.bot_url}?start=ref${snapshot?.user.telegram_id || ""}`;
   const cabinetRefLink = `${window.location.origin}/cabinet?ref=${snapshot?.user.telegram_id || ""}`;
   const activeConfigs = (snapshot?.user.configs || []).filter((cfg) => cfg.is_active);
@@ -1109,9 +1111,9 @@ function CabinetPage() {
                 <article className="panel">
                   <h3>Quick tools</h3>
                   <div className="action-row">
-                    {activeConfigs[0]?.vless_url ? (
-                      <button className="ui-btn ghost" type="button" onClick={() => void copyText(activeConfigs[0].vless_url)}>
-                        Copy access key
+                    {accessLink ? (
+                      <button className="ui-btn ghost" type="button" onClick={() => void copyText(accessLink)}>
+                        Copy access link
                       </button>
                     ) : null}
                     <button className="ui-btn ghost" type="button" onClick={() => navigate("help")}>
@@ -1182,8 +1184,8 @@ function CabinetPage() {
                           <small>Created: {fmtDate(cfg.created_at)}</small>
                         </div>
                         <div className="action-row">
-                          <button className="ui-btn ghost small" type="button" onClick={() => void copyText(cfg.vless_url)}>
-                            Copy key
+                          <button className="ui-btn ghost small" type="button" onClick={() => void copyText(accessLink || cfg.vless_url)}>
+                            Copy access link
                           </button>
                           <button className="ui-btn ghost small danger" type="button" onClick={() => setRevokeCandidate(cfg)} disabled={actionPending}>
                             Remove

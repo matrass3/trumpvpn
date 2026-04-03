@@ -2974,6 +2974,7 @@ def serialize_user(user: User | None, invited_count: int = 0, referral_bonus_rub
         "pending_discount_promo_id": user.pending_discount_promo_id,
         "subscription_until": user.subscription_until,
         "subscription_active": is_subscription_active(user),
+        "subscription_url": build_user_subscription_url(int(user.telegram_id)),
         "invited_count": invited_count,
         "referral_bonus_rub": referral_bonus_rub,
         "configs": configs,
