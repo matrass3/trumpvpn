@@ -966,6 +966,7 @@ function CabinetPage() {
       const parsed = new URL(accessLink);
       parsed.searchParams.set("fmt", "b64");
       parsed.searchParams.set("preview", "0");
+      parsed.searchParams.set("pool", "all");
       return parsed.toString();
     } catch {
       return accessLink;

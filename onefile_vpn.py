@@ -1538,7 +1538,7 @@ def _render_subscription_preview_page(
     happ_import_url = ""
     # HApp deeplink import is more stable with the default/base64 subscription payload.
     # Force preview off, but keep b64 format.
-    happ_payload_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0")
+    happ_payload_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0", pool="all")
     try:
         happ_import_url = str(settings.happ_import_url_template or "").format(
             url=quote(happ_payload_url, safe=""),
@@ -3070,6 +3070,8 @@ def _prepare_user_subscription_data(
         user = fetch_user_with_configs(db, telegram_id) or user
 
     client_app_name = _subscription_client_app_name(str(request.headers.get("user-agent", "") or "")) if request else "client"
+    pool_mode = str(request.query_params.get("pool") or "").strip().lower() if request else ""
+    force_pool_all = pool_mode in {"all", "1", "true", "yes"}
     fmt_norm = str(fmt or "").strip().lower()
     if client_app_name == "happ" and fmt_norm in {"raw", "plain", "txt"}:
         fmt_norm = "b64"
@@ -3077,6 +3079,8 @@ def _prepare_user_subscription_data(
     max_configs = max(1, int(MAX_ACTIVE_CONFIGS_PER_USER))
     active_configs = _active_subscription_configs(user, max_configs)
     requested_device_name = _derive_device_name_from_subscription_request(request) if request else None
+    if force_pool_all:
+        requested_device_name = None
 
     if request and requested_device_name:
         requested_key = _device_name_key(requested_device_name)
@@ -3105,7 +3109,7 @@ def _prepare_user_subscription_data(
 
     # For HApp imports, try to backfill missing server configs for one existing device,
     # so subscription list contains all enabled servers.
-    if client_app_name == "happ":
+    if client_app_name == "happ" or force_pool_all:
         device_candidates: list[str] = []
         if requested_device_name:
             device_candidates.append(str(requested_device_name))
@@ -3127,7 +3131,7 @@ def _prepare_user_subscription_data(
 
     # HApp should import full server pool for the account, not just one device slice.
     # Pick one latest active config per server to avoid duplicate entries for the same node.
-    if client_app_name == "happ":
+    if client_app_name == "happ" or force_pool_all:
         by_server: dict[int, ClientConfig] = {}
         for cfg in list(user.configs or []):
             if not (cfg.is_active and cfg.server and bool(cfg.server.enabled)):
@@ -3195,7 +3199,15 @@ def _build_subscription_preview_payload(request: Request, prepared: Subscription
     stats_url = _public_subscription_page_url(request, telegram_id, token)
 
     happ_import_url = ""
-    happ_payload_url = _subscription_variant_url(request, telegram_id, token, fmt="b64", preview="0", with_stats=None)
+    happ_payload_url = _subscription_variant_url(
+        request,
+        telegram_id,
+        token,
+        fmt="b64",
+        preview="0",
+        with_stats=None,
+        pool="all",
+    )
     try:
         happ_import_url = str(settings.happ_import_url_template or "").format(
             url=quote(happ_payload_url, safe=""),
@@ -11089,7 +11101,7 @@ def giveaways_kb(giveaways: list[dict[str, Any]]) -> InlineKeyboardMarkup:
 
 def subscription_link_kb(telegram_id: int) -> InlineKeyboardMarkup:
     happ_sub_url = build_user_subscription_url(telegram_id)
-    happ_sub_url = f"{happ_sub_url}{'&' if '?' in happ_sub_url else '?'}fmt=b64&preview=0"
+    happ_sub_url = f"{happ_sub_url}{'&' if '?' in happ_sub_url else '?'}fmt=b64&preview=0&pool=all"
     sub_url = build_user_subscription_url(telegram_id)
     encoded_happ_sub_url = quote(happ_sub_url, safe="")
     try:
@@ -12409,11 +12421,7 @@ async def sub_howto_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "sub:happ")
 async def sub_happ_callback(callback: CallbackQuery):
     sub_url = build_user_subscription_url(callback.from_user.id)
-    happ_sub_url = build_user_subscription_url_for_device(
-        callback.from_user.id,
-        device_name="happ",
-    )
-    happ_sub_url = f"{happ_sub_url}{'&' if '?' in happ_sub_url else '?'}fmt=b64&preview=0"
+    happ_sub_url = f"{sub_url}{'&' if '?' in sub_url else '?'}fmt=b64&preview=0&pool=all"
     encoded_happ_sub_url = quote(happ_sub_url, safe="")
     try:
         happ_url = str(settings.happ_import_url_template).format(url=encoded_happ_sub_url, raw_url=happ_sub_url)
