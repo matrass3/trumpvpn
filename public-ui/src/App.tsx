@@ -57,35 +57,18 @@ type AppNotice = {
   kind: NoticeKind;
   title: string;
   body: string;
+  count: number;
   read: boolean;
   created_at: number;
 };
 
-declare global {
-  interface Window {
-    Telegram?: {
-      WebApp?: {
-        initData?: string;
-        ready?: () => void;
-        expand?: () => void;
-        openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
-        HapticFeedback?: {
-          impactOccurred?: (style: "light" | "medium" | "heavy" | "rigid" | "soft") => void;
-          notificationOccurred?: (kind: "error" | "success" | "warning") => void;
-          selectionChanged?: () => void;
-        };
-      };
-    };
-  }
-}
-
 const NAV: Array<{ key: CabinetSection; title: string; icon: string }> = [
-  { key: "dashboard", title: "Home", icon: "🏠" },
-  { key: "subscription", title: "Subscription", icon: "✨" },
-  { key: "balance", title: "Balance", icon: "💳" },
-  { key: "referrals", title: "Referrals", icon: "👥" },
-  { key: "giveaways", title: "Fortune", icon: "🎁" },
-  { key: "help", title: "Help", icon: "❓" },
+  { key: "dashboard", title: "Home", icon: "HOME" },
+  { key: "subscription", title: "Subscription", icon: "SUB" },
+  { key: "balance", title: "Balance", icon: "WALLET" },
+  { key: "referrals", title: "Referrals", icon: "USERS" },
+  { key: "giveaways", title: "Fortune", icon: "GIFT" },
+  { key: "help", title: "Help", icon: "HELP" },
 ];
 
 const GATEWAYS = [
@@ -129,9 +112,15 @@ function sanitizeError(raw: string) {
   let extracted = source;
   try {
     const parsed = JSON.parse(source) as { detail?: unknown; message?: unknown; error?: unknown };
-    if (typeof parsed?.detail === "string" && parsed.detail.trim()) extracted = parsed.detail.trim();
-    else if (typeof parsed?.message === "string" && parsed.message.trim()) extracted = parsed.message.trim();
-    else if (typeof parsed?.error === "string" && parsed.error.trim()) extracted = parsed.error.trim();
+    if (typeof parsed?.detail === "string" && parsed.detail.trim()) {
+      extracted = parsed.detail.trim();
+    } else if (parsed?.detail && typeof parsed.detail === "object" && typeof (parsed.detail as { message?: unknown }).message === "string") {
+      extracted = String((parsed.detail as { message?: string }).message || "").trim();
+    } else if (typeof parsed?.message === "string" && parsed.message.trim()) {
+      extracted = parsed.message.trim();
+    } else if (typeof parsed?.error === "string" && parsed.error.trim()) {
+      extracted = parsed.error.trim();
+    }
   } catch {
     extracted = source;
   }
@@ -139,31 +128,47 @@ function sanitizeError(raw: string) {
   const text = extracted.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   if (!text) return "Request failed";
 
-  if (/telegram user not found/i.test(text)) return "Пользователь Telegram не найден. Откройте Mini App через кнопку в боте.";
-  if (/signature mismatch|invalid init_data|expired/i.test(text)) return "Сессия Telegram истекла. Откройте Mini App заново из бота.";
-
+  if (/telegram user not found/i.test(text)) return "Telegram user not found. Re-open Mini App from the bot.";
+  if (/signature mismatch|invalid init_data|expired/i.test(text)) return "Telegram session expired. Re-open Mini App from the bot.";
   if (/vpn revoke failed/i.test(text)) {
     const cfgMatch = text.match(/cfg#(\d+)/i);
-    const cfgSuffix = cfgMatch ? ` (конфиг #${cfgMatch[1]})` : "";
-    if (/authentication failed/i.test(text)) {
-      return `Не удалось удалить устройство${cfgSuffix}: ошибка SSH-аутентификации на сервере.`;
-    }
-    if (/jq: error|cannot iterate over null/i.test(text)) {
-      return `Не удалось удалить устройство${cfgSuffix}: ошибка конфигурации VPN-сервера.`;
-    }
-    return `Не удалось удалить устройство${cfgSuffix}. Попробуйте позже.`;
+    const cfgSuffix = cfgMatch ? ` (cfg #${cfgMatch[1]})` : "";
+    if (/authentication failed/i.test(text)) return `Unable to revoke device${cfgSuffix}: SSH authentication failed.`;
+    if (/jq: error|cannot iterate over null/i.test(text)) return `Unable to revoke device${cfgSuffix}: VPN node config issue.`;
+    return `Unable to revoke device${cfgSuffix}. Try again later.`;
   }
-
   const insufficient = text.match(/insufficient balance\.?\s*need\s*(\d+)\s*rub,\s*missing\s*(\d+)\s*rub/i);
   if (insufficient) {
     const need = Number(insufficient[1] || 0);
     const missing = Number(insufficient[2] || 0);
-    return `Недостаточно средств: нужно ${fmtRub(need)}, не хватает ${fmtRub(missing)}.`;
+    return `Insufficient balance: need ${fmtRub(need)}, missing ${fmtRub(missing)}.`;
   }
 
-  if (/unauthorized|401/i.test(text)) return "Требуется авторизация в Telegram Mini App.";
+  if (/unauthorized|401/i.test(text)) return "Authorization required in Telegram Mini App.";
   if (/502|504|bad gateway|gateway timeout|gateway time-out/i.test(text)) return "Service is temporarily unavailable. Try again in 20-30 seconds.";
   return text.slice(0, 320);
+}
+
+function isAuthError(message: string) {
+  const text = String(message || "").toLowerCase();
+  return text.includes("authorization required in telegram mini app") || text.includes("unauthorized") || text.includes("401");
+}
+
+function extractMissingRub(message: string): number {
+  const text = String(message || "");
+  const match = text.match(/missing\s*([0-9\s]+)/i);
+  if (!match) return 0;
+  const amount = Number(match[1].replace(/\s+/g, ""));
+  return Number.isFinite(amount) ? Math.max(0, amount) : 0;
+}
+
+function makeIdempotencyKey(prefix: string) {
+  const safePrefix = String(prefix || "pay").replace(/[^a-z0-9_-]/gi, "").toLowerCase() || "pay";
+  const rnd =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID().replace(/-/g, "").slice(0, 16)
+      : Math.random().toString(36).slice(2, 14);
+  return `${safePrefix}-${Date.now()}-${rnd}`;
 }
 
 function pathFromSection(section: CabinetSection) {
@@ -184,7 +189,7 @@ function sectionFromPath(pathname: string): CabinetSection {
 
 function planLabel(plan: { label: string; months: number; days: number }) {
   const label = String(plan.label || "").trim();
-  if (label && !/(?:\u0420.|\u00D0.|\u00D1.){2,}/.test(label) && !label.includes("\uFFFD")) return label;
+  if (label && !label.includes("\uFFFD") && !/\?{3,}/.test(label)) return label;
   const m = plan.months > 0 ? plan.months : Math.max(1, Math.round(plan.days / 30));
   if (m === 1) return "1 month";
   if (m === 3) return "3 months";
@@ -377,6 +382,8 @@ function CabinetPage() {
   const [promoCode, setPromoCode] = useState("");
   const [invoiceToCheck, setInvoiceToCheck] = useState(0);
   const [createdInvoice, setCreatedInvoice] = useState<{ invoice_id: number; pay_url: string } | null>(null);
+  const [pendingInvoiceId, setPendingInvoiceId] = useState(0);
+  const [pendingInvoiceChecks, setPendingInvoiceChecks] = useState(0);
   const [miniAppAuthPending, setMiniAppAuthPending] = useState(false);
   const [miniAppAuthError, setMiniAppAuthError] = useState("");
   const [notifications, setNotifications] = useState<AppNotice[]>([]);
@@ -385,6 +392,7 @@ function CabinetPage() {
   const [deviceFilter, setDeviceFilter] = useState("");
   const [protocolFilter, setProtocolFilter] = useState("all");
   const [revokeCandidate, setRevokeCandidate] = useState<CabinetConfig | null>(null);
+  const [quickAmount, setQuickAmount] = useState(500);
   const noticeSeq = useRef(0);
   const previousSnapshot = useRef<CabinetSnapshot | null>(null);
   const expiryMarker = useRef("");
@@ -393,16 +401,34 @@ function CabinetPage() {
   const authRetryStopped = useRef(false);
   const showNotificationsRef = useRef(false);
   const recentNoticeMap = useRef<Map<string, number>>(new Map());
+  const authRefreshTimer = useRef<number | null>(null);
+  const pendingInvoiceTimer = useRef<number | null>(null);
+  const pendingInvoiceChecksRef = useRef(0);
 
   const pushNotice = useCallback((kind: NoticeKind, body: string, title?: string) => {
     const now = Date.now();
     const normalizedTitle = title || noticeTitleByKind(kind);
     const dedupeKey = `${kind}|${normalizedTitle}|${String(body || "").trim()}`;
     const prevTs = recentNoticeMap.current.get(dedupeKey) || 0;
-    if (now - prevTs < 12000) return;
     recentNoticeMap.current.set(dedupeKey, now);
     for (const [key, ts] of recentNoticeMap.current.entries()) {
       if (now - ts > 90000) recentNoticeMap.current.delete(key);
+    }
+
+    if (now - prevTs < 12000) {
+      setNotifications((prev) => {
+        const idx = prev.findIndex((item) => `${item.kind}|${item.title}|${item.body}` === dedupeKey);
+        if (idx < 0) return prev;
+        const next = [...prev];
+        next[idx] = {
+          ...next[idx],
+          count: Math.min(99, (next[idx].count || 1) + 1),
+          read: false,
+          created_at: now,
+        };
+        return next;
+      });
+      return;
     }
 
     const id = ++noticeSeq.current;
@@ -411,6 +437,7 @@ function CabinetPage() {
       kind,
       title: normalizedTitle,
       body,
+      count: 1,
       read: false,
       created_at: now,
     };
@@ -424,6 +451,12 @@ function CabinetPage() {
   }, []);
 
   const unreadNotifications = useMemo(() => notifications.filter((item) => !item.read).length, [notifications]);
+
+  const navigate = useCallback((next: CabinetSection) => {
+    const nextPath = pathFromSection(next);
+    if (window.location.pathname !== nextPath) window.history.pushState({}, "", nextPath);
+    setSection(next);
+  }, []);
 
   useEffect(() => {
     const onPop = () => setSection(sectionFromPath(window.location.pathname));
@@ -451,6 +484,49 @@ function CabinetPage() {
     script.onload = onReady;
     document.head.appendChild(script);
   }, []);
+
+  useEffect(() => {
+    const back = window.Telegram?.WebApp?.BackButton;
+    if (!back) return;
+    const handleBack = () => {
+      if (section !== "dashboard") navigate("dashboard");
+    };
+    if (section === "dashboard") back.hide?.();
+    else back.show?.();
+    back.onClick?.(handleBack);
+    return () => back.offClick?.(handleBack);
+  }, [section, navigate]);
+
+  const refreshSession = useCallback(async () => {
+    try {
+      const result = await apiJson<{ session_token?: string; ok?: boolean }>("/api/public/auth/session/refresh", {
+        method: "POST",
+      });
+      const token = String(result?.session_token || "").trim();
+      if (token) window.localStorage.setItem(PUBLIC_SESSION_STORAGE_KEY, token);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (unauthorized) return;
+    const schedule = () => {
+      if (authRefreshTimer.current) window.clearTimeout(authRefreshTimer.current);
+      authRefreshTimer.current = window.setTimeout(async () => {
+        await refreshSession();
+        schedule();
+      }, 10 * 60 * 1000);
+    };
+    schedule();
+    return () => {
+      if (authRefreshTimer.current) {
+        window.clearTimeout(authRefreshTimer.current);
+        authRefreshTimer.current = null;
+      }
+    };
+  }, [unauthorized, refreshSession]);
 
   const refresh = useCallback(async () => {
     setPending(true);
@@ -502,12 +578,6 @@ function CabinetPage() {
     previousSnapshot.current = snapshot;
   }, [snapshot, pushNotice]);
 
-  const navigate = useCallback((next: CabinetSection) => {
-    const nextPath = pathFromSection(next);
-    if (window.location.pathname !== nextPath) window.history.pushState({}, "", nextPath);
-    setSection(next);
-  }, []);
-
   async function withAction(action: () => Promise<void>) {
     setActionPending(true);
     try {
@@ -515,10 +585,10 @@ function CabinetPage() {
       await refresh();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Action failed";
-      if (/unauthorized|401|авторизац/i.test(msg)) {
+      if (isAuthError(msg)) {
         setUnauthorized(true);
         setSnapshot(null);
-        setMiniAppAuthError("Сессия обновляется через Telegram...");
+        setMiniAppAuthError("Refreshing session via Telegram Mini App...");
         authRetryStopped.current = false;
         authRetryAttempt.current = 0;
         return;
@@ -579,11 +649,11 @@ function CabinetPage() {
       if (!initData) {
         authRetryAttempt.current += 1;
         if (authRetryAttempt.current > 20) {
-          setMiniAppAuthError("Не удалось получить данные Telegram Mini App. Откройте приложение заново из бота.");
+          setMiniAppAuthError("Unable to read Telegram Mini App session. Re-open Mini App from bot.");
           authRetryStopped.current = true;
           return false;
         }
-        setMiniAppAuthError("Ожидание данных Telegram Mini App...");
+        setMiniAppAuthError("Waiting for Telegram Mini App session...");
         authRetryTimer.current = window.setTimeout(() => {
           if (!cancelled) void run(true);
         }, 800);
@@ -660,25 +730,68 @@ function CabinetPage() {
       triggerNotify("success");
     });
   }
+  const checkInvoiceStatus = useCallback(
+    async (invoiceId: number, options?: { silent?: boolean; source?: "manual" | "auto" }) => {
+      const id = Number(invoiceId || 0);
+      if (!id) throw new Error("Enter invoice ID");
+      const source = options?.source || "manual";
+      const silent = Boolean(options?.silent);
+      const result = await apiJson<{ status: string }>("/api/public/cabinet/payments/check", {
+        method: "POST",
+        body: JSON.stringify({ invoice_id: id }),
+      });
+      const statusValue = String(result.status || "").toLowerCase();
+      trackEvent("invoice_checked", { invoice_id: id, status: statusValue, source });
+      if (statusValue === "paid") {
+        trackEvent("invoice_paid", { invoice_id: id, source });
+        pendingInvoiceChecksRef.current = 0;
+        setPendingInvoiceChecks(0);
+        setPendingInvoiceId(0);
+        triggerNotify("success");
+        if (!silent) pushNotice("success", `Payment #${id} confirmed.`, "Payment");
+        await refresh();
+        return statusValue;
+      }
+      if (statusValue === "expired" || statusValue === "cancelled") {
+        pendingInvoiceChecksRef.current = 0;
+        setPendingInvoiceChecks(0);
+        setPendingInvoiceId(0);
+        if (!silent) pushNotice("warn", `Payment #${id} is ${statusValue}.`, "Payment");
+        return statusValue;
+      }
+      if (!silent) pushNotice("info", `Payment #${id}: ${result.status}`, "Payment");
+      return statusValue;
+    },
+    [pushNotice, refresh]
+  );
 
   async function createInvoice(event: FormEvent) {
     event.preventDefault();
     triggerImpact("medium");
     await withAction(async () => {
-      const result = await apiJson<{ invoice_id: number; pay_url: string }>("/api/public/cabinet/payments/create", {
+      const idemKey = makeIdempotencyKey("topup");
+      const result = await apiJson<{ invoice_id: number; pay_url: string; idempotent_reuse?: boolean }>("/api/public/cabinet/payments/create", {
         method: "POST",
-        body: JSON.stringify({ amount_rub: Number(topupAmount || 0), gateway: topupGateway }),
+        body: JSON.stringify({ amount_rub: Number(topupAmount || 0), gateway: topupGateway, idempotency_key: idemKey }),
       });
       setCreatedInvoice(result);
       setInvoiceToCheck(result.invoice_id);
-      trackEvent("invoice_created", { invoice_id: result.invoice_id, amount_rub: Number(topupAmount || 0), gateway: topupGateway });
+      setPendingInvoiceId(result.invoice_id);
+      pendingInvoiceChecksRef.current = 0;
+      setPendingInvoiceChecks(0);
+      trackEvent("invoice_created", {
+        invoice_id: result.invoice_id,
+        amount_rub: Number(topupAmount || 0),
+        gateway: topupGateway,
+        idempotent_reuse: Boolean(result.idempotent_reuse),
+      });
       const opened = openPaymentUrl(result.pay_url);
       trackEvent("pay_link_opened", { invoice_id: result.invoice_id, source: "auto", opened });
       if (opened) {
-        pushNotice("success", `Счет #${result.invoice_id} создан. Ссылка оплаты открыта автоматически.`, "Payment");
+        pushNotice("success", `Payment link for invoice #${result.invoice_id} opened.`, "Payment");
         triggerNotify("success");
       } else {
-        pushNotice("warn", `Счет #${result.invoice_id} создан. Откройте ссылку оплаты вручную.`, "Payment");
+        pushNotice("warn", `Invoice #${result.invoice_id} created. Open payment link manually.`, "Payment");
       }
     });
   }
@@ -686,28 +799,117 @@ function CabinetPage() {
   async function checkInvoice(invoiceId?: number) {
     await withAction(async () => {
       const id = Number(invoiceId || invoiceToCheck || 0);
-      if (!id) throw new Error("Enter invoice ID");
-      const result = await apiJson<{ status: string }>("/api/public/cabinet/payments/check", {
-        method: "POST",
-        body: JSON.stringify({ invoice_id: id }),
-      });
-      const statusValue = String(result.status || "").toLowerCase();
-      trackEvent("invoice_checked", { invoice_id: id, status: statusValue });
-      if (statusValue === "paid") {
-        trackEvent("invoice_paid", { invoice_id: id, source: "manual_check" });
-      }
-      pushNotice("info", `Invoice #${id}: ${result.status}`);
+      await checkInvoiceStatus(id, { source: "manual", silent: false });
     });
   }
 
+  useEffect(() => {
+    return () => {
+      if (pendingInvoiceTimer.current) {
+        window.clearTimeout(pendingInvoiceTimer.current);
+        pendingInvoiceTimer.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingInvoiceId || unauthorized) return;
+    let cancelled = false;
+
+    const stopPolling = () => {
+      if (pendingInvoiceTimer.current) {
+        window.clearTimeout(pendingInvoiceTimer.current);
+        pendingInvoiceTimer.current = null;
+      }
+      pendingInvoiceChecksRef.current = 0;
+      setPendingInvoiceChecks(0);
+    };
+
+    const schedule = (delayMs: number) => {
+      if (pendingInvoiceTimer.current) window.clearTimeout(pendingInvoiceTimer.current);
+      pendingInvoiceTimer.current = window.setTimeout(() => {
+        void tick();
+      }, delayMs);
+    };
+
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const status = await checkInvoiceStatus(pendingInvoiceId, { source: "auto", silent: true });
+        if (status === "paid" || status === "expired" || status === "cancelled") {
+          stopPolling();
+          return;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Invoice check failed";
+        if (isAuthError(msg)) {
+          setUnauthorized(true);
+          setSnapshot(null);
+          setMiniAppAuthError("Refreshing session via Telegram Mini App...");
+          stopPolling();
+          return;
+        }
+        if (pendingInvoiceChecksRef.current === 0) {
+          pushNotice("warn", "Payment status check is temporary unavailable. Retrying...");
+        }
+      }
+
+      pendingInvoiceChecksRef.current += 1;
+      setPendingInvoiceChecks(pendingInvoiceChecksRef.current);
+      if (pendingInvoiceChecksRef.current >= 40) {
+        pushNotice("warn", `Payment #${pendingInvoiceId} is still pending. You can check manually.`, "Payment");
+        setPendingInvoiceId(0);
+        stopPolling();
+        return;
+      }
+      schedule(5000);
+    };
+
+    schedule(5000);
+    return () => {
+      cancelled = true;
+      if (pendingInvoiceTimer.current) {
+        window.clearTimeout(pendingInvoiceTimer.current);
+        pendingInvoiceTimer.current = null;
+      }
+    };
+  }, [pendingInvoiceId, unauthorized, checkInvoiceStatus, pushNotice]);
+
   async function buyPlan(planId: string) {
     triggerImpact("medium");
-    await withAction(async () => {
+    setActionPending(true);
+    try {
       trackEvent("plan_purchase_requested", { plan_id: planId });
       await apiJson("/api/public/cabinet/purchase-plan", { method: "POST", body: JSON.stringify({ plan_id: planId }) });
       pushNotice("success", "Plan purchased.");
       triggerNotify("success");
-    });
+      await refresh();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Plan purchase failed";
+      if (isAuthError(msg)) {
+        setUnauthorized(true);
+        setSnapshot(null);
+        setMiniAppAuthError("Refreshing session via Telegram Mini App...");
+        return;
+      }
+      if (/insufficient balance/i.test(msg)) {
+        const missing = extractMissingRub(msg);
+        const suggested = Math.max(
+          snapshot?.payment.min_topup_rub || 100,
+          Math.min(snapshot?.payment.max_topup_rub || 200000, missing > 0 ? missing : quickAmount || 500)
+        );
+        setQuickAmount(suggested);
+        setTopupAmount(suggested);
+        navigate("balance");
+        pushNotice("warn", `Not enough balance. Top up ${fmtRub(suggested)} to continue.`, "Payment");
+        triggerNotify("warning");
+      } else {
+        pushNotice("error", msg);
+        triggerNotify("error");
+      }
+    } finally {
+      setActionPending(false);
+    }
   }
 
   async function joinGiveaway(giveawayId: number) {
@@ -718,16 +920,26 @@ function CabinetPage() {
       triggerNotify("success");
     });
   }
-
   async function doRevokeConfig(configId: number) {
     await withAction(async () => {
-      const result = await apiJson<{ status: string; revoked_count?: number }>("/api/public/cabinet/configs/revoke", {
+      const result = await apiJson<{ status: string; revoked_count?: number; revoked_mode?: string; failed_count?: number }>("/api/public/cabinet/configs/revoke", {
         method: "POST",
         body: JSON.stringify({ config_id: configId }),
       });
-      trackEvent("device_revoked", { config_id: configId, revoked_count: result.revoked_count || 0 });
-      pushNotice("success", `Device access revoked (${result.revoked_count || 0}).`);
-      triggerNotify("success");
+      const localOnly = String(result.revoked_mode || "") === "local_only";
+      trackEvent("device_revoked", {
+        config_id: configId,
+        revoked_count: result.revoked_count || 0,
+        failed_count: result.failed_count || 0,
+        mode: localOnly ? "local_only" : "remote",
+      });
+      if (localOnly) {
+        pushNotice("warn", "Device disabled locally. Remote server is unavailable now.", "Devices");
+        triggerNotify("warning");
+      } else {
+        pushNotice("success", `Device access revoked (${result.revoked_count || 0}).`);
+        triggerNotify("success");
+      }
     });
   }
 
@@ -764,6 +976,12 @@ function CabinetPage() {
     if (!revokeCandidate) return 0;
     return activeConfigs.filter((cfg) => cfg.device_name === revokeCandidate.device_name).length;
   }, [activeConfigs, revokeCandidate]);
+  const quickTopupValues = useMemo(() => {
+    const min = Math.max(1, snapshot?.payment.min_topup_rub || 100);
+    const max = Math.max(min, snapshot?.payment.max_topup_rub || 200000);
+    const raw = [quickAmount, 300, 500, 1000, 2000];
+    return Array.from(new Set(raw.map((item) => Math.min(max, Math.max(min, Number(item || 0)))))).sort((a, b) => a - b);
+  }, [snapshot?.payment.min_topup_rub, snapshot?.payment.max_topup_rub, quickAmount]);
 
   return (
     <main className="cabinet-root">
@@ -815,25 +1033,12 @@ function CabinetPage() {
 
         {!pending && unauthorized ? (
           <section className="panel">
-            <h2>Telegram Mini App Login</h2>
-            <p>{miniAppAuthPending ? "Authorizing via Telegram Mini App..." : miniAppAuthError || "Waiting for Telegram Mini App session..."}</p>
+            <h2>Telegram Mini App Required</h2>
+            <p>{miniAppAuthPending ? "Authorizing via Telegram Mini App..." : miniAppAuthError || "Open this page from Telegram bot Mini App."}</p>
             <div className="action-row">
               <a className="ui-btn primary" href={config.bot_url} target="_blank" rel="noreferrer noopener">
                 Open bot and launch Mini App
               </a>
-              <button
-                className="ui-btn ghost"
-                type="button"
-                onClick={() => {
-                  const initData = getTelegramMiniAppInitData();
-                  authRetryStopped.current = false;
-                  authRetryAttempt.current = 0;
-                  void loginWithMiniApp(initData, false);
-                }}
-                disabled={miniAppAuthPending}
-              >
-                Retry mini app auth
-              </button>
             </div>
           </section>
         ) : null}
@@ -1011,6 +1216,22 @@ function CabinetPage() {
 
                 <article className="panel">
                   <h3>Top up balance</h3>
+                  <div className="quick-amounts">
+                    {quickTopupValues.map((amount) => (
+                      <button
+                        key={amount}
+                        className={`chip-btn ${Number(topupAmount || 0) === amount ? "active" : ""}`}
+                        type="button"
+                        onClick={() => {
+                          triggerImpact("light");
+                          setTopupAmount(amount);
+                          setQuickAmount(amount);
+                        }}
+                      >
+                        {fmtRub(amount)}
+                      </button>
+                    ))}
+                  </div>
                   <form className="topup-form" onSubmit={(event) => void createInvoice(event)}>
                     <label>
                       Amount (RUB)
@@ -1041,6 +1262,9 @@ function CabinetPage() {
                   {createdInvoice ? (
                     <div className="invoice-box">
                       <p>Invoice #{createdInvoice.invoice_id}</p>
+                      {pendingInvoiceId === createdInvoice.invoice_id ? (
+                        <p className="muted-text">Waiting for payment confirmation... check #{pendingInvoiceChecks}/40</p>
+                      ) : null}
                       <div className="action-row">
                         <button
                           className="ui-btn ghost"
@@ -1050,7 +1274,7 @@ function CabinetPage() {
                             const opened = openPaymentUrl(createdInvoice.pay_url);
                             trackEvent("pay_link_opened", { invoice_id: createdInvoice.invoice_id, source: "manual", opened });
                             if (!opened) {
-                              pushNotice("warn", "Не удалось открыть ссылку оплаты автоматически.");
+                              pushNotice("warn", "Unable to open payment link automatically.");
                             }
                           }}
                         >
@@ -1170,7 +1394,15 @@ function CabinetPage() {
 
             <nav className="bottom-nav">
               {NAV.map((item) => (
-                <button key={item.key} type="button" className={`nav-item ${section === item.key ? "active" : ""}`} onClick={() => navigate(item.key)}>
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`nav-item ${section === item.key ? "active" : ""}`}
+                  onClick={() => {
+                    triggerImpact("light");
+                    navigate(item.key);
+                  }}
+                >
                   <span className="nav-icon">{item.icon}</span>
                   <span>{item.title}</span>
                 </button>

@@ -260,6 +260,9 @@ def run_sqlite_migrations() -> None:
                 conn.execute("ALTER TABLE payment_invoices ADD COLUMN promo_code_text TEXT")
             if not _sqlite_column_exists(conn, "payment_invoices", "promo_discount_percent"):
                 conn.execute("ALTER TABLE payment_invoices ADD COLUMN promo_discount_percent INTEGER NOT NULL DEFAULT 0")
+            if not _sqlite_column_exists(conn, "payment_invoices", "idempotency_key"):
+                conn.execute("ALTER TABLE payment_invoices ADD COLUMN idempotency_key TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_payment_invoices_idempotency_key ON payment_invoices (idempotency_key)")
         if _sqlite_table_exists(conn, "server_load_samples"):
             if not _sqlite_column_exists(conn, "server_load_samples", "latency_ms"):
                 conn.execute("ALTER TABLE server_load_samples ADD COLUMN latency_ms FLOAT NOT NULL DEFAULT 0")
@@ -413,6 +416,7 @@ class PaymentInvoice(Base):
     kind: Mapped[str] = mapped_column(String(32), default="topup")
     promo_code_text: Mapped[str | None] = mapped_column(String(64), nullable=True)
     promo_discount_percent: Mapped[int] = mapped_column(Integer, default=0)
+    idempotency_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     credited_rub: Mapped[int] = mapped_column(Integer, default=0)
     referral_bonus_rub: Mapped[int] = mapped_column(Integer, default=0)
     pay_url: Mapped[str] = mapped_column(Text)
@@ -581,6 +585,7 @@ class CreatePaymentRequest(BaseModel):
     telegram_id: int
     amount_rub: int = Field(ge=1, le=1_000_000)
     gateway: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=80)
 
 
 class CheckPaymentRequest(BaseModel):
@@ -837,7 +842,13 @@ def _public_user_from_request(request: Request, db: Session) -> User:
             return loaded
         return user
 
-    raise HTTPException(status_code=401, detail="Unauthorized")
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "code": "auth_required",
+            "message": "Требуется авторизация в Telegram Mini App.",
+        },
+    )
 
 
 def _public_cabinet_payload(db: Session, user: User) -> dict[str, Any]:
@@ -2220,6 +2231,7 @@ def _remove_active_configs_remotely_grouped(
             continue
 
         removed_on_server: list[ClientConfig] = []
+        removed_local_only: list[ClientConfig] = []
         restart_done_by_script = False
         for cfg in rows:
             try:
@@ -2233,12 +2245,31 @@ def _remove_active_configs_remotely_grouped(
                 restart_done_by_script = restart_done_by_script or bool(restarted)
                 removed_on_server.append(cfg)
             except Exception as exc:
+                text = str(exc or "").lower()
+                local_only_markers = (
+                    "authentication failed",
+                    "timed out",
+                    "timeout",
+                    "unable to connect",
+                    "connection refused",
+                    "connection reset",
+                    "network is unreachable",
+                    "no route to host",
+                    "name or service not known",
+                    "temporary failure in name resolution",
+                )
+                if any(marker in text for marker in local_only_markers):
+                    removed_local_only.append(cfg)
+                    warnings.append(
+                        f"cfg#{int(cfg.id)}@{server.name}: remote revoke unavailable ({exc}), local revoke only"
+                    )
+                    continue
                 errors.append(f"cfg#{int(cfg.id)}@{server.name}: {exc}")
 
-        if not removed_on_server:
+        if not removed_on_server and not removed_local_only:
             continue
 
-        if not restart_done_by_script:
+        if removed_on_server and not restart_done_by_script:
             try:
                 restart_server_service(server, timeout=restart_timeout, no_block=False)
             except Exception as exc:
@@ -2248,6 +2279,8 @@ def _remove_active_configs_remotely_grouped(
                 except Exception as exc2:
                     errors.append(f"server#{int(server_id)}: restart failed after removals: {exc2}")
         for cfg in removed_on_server:
+            removed_ids.add(int(cfg.id))
+        for cfg in removed_local_only:
             removed_ids.add(int(cfg.id))
 
     return removed_ids, errors, warnings
@@ -3226,6 +3259,7 @@ def public_auth_telegram(payload: TelegramAuthRequest, request: Request, respons
     return {
         "ok": True,
         "session_token": session_token,
+        "expires_in": max(1, int(settings.public_user_session_hours or 720)) * 3600,
         "user": {
             "telegram_id": int(user.telegram_id),
             "username": str(user.username or ""),
@@ -3247,10 +3281,23 @@ def public_auth_miniapp(
     return {
         "ok": True,
         "session_token": session_token,
+        "expires_in": max(1, int(settings.public_user_session_hours or 720)) * 3600,
         "user": {
             "telegram_id": int(user.telegram_id),
             "username": str(user.username or ""),
         },
+    }
+
+
+@app.post("/api/public/auth/session/refresh")
+def public_auth_session_refresh(request: Request, response: Response, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    _set_public_user_cookie(response, telegram_id=int(user.telegram_id), request=request)
+    return {
+        "ok": True,
+        "session_token": make_public_user_session_token(int(user.telegram_id)),
+        "telegram_id": int(user.telegram_id),
+        "expires_in": max(1, int(settings.public_user_session_hours or 720)) * 3600,
     }
 
 
@@ -3300,7 +3347,13 @@ def public_cabinet_create_payment(payload: dict[str, Any], request: Request, db:
     user = _public_user_from_request(request, db)
     amount_rub = int(payload.get("amount_rub") or 0)
     gateway = str(payload.get("gateway") or "").strip() or None
-    req = CreatePaymentRequest(telegram_id=int(user.telegram_id), amount_rub=amount_rub, gateway=gateway)
+    idempotency_key = str(payload.get("idempotency_key") or "").strip() or None
+    req = CreatePaymentRequest(
+        telegram_id=int(user.telegram_id),
+        amount_rub=amount_rub,
+        gateway=gateway,
+        idempotency_key=idempotency_key,
+    )
     return create_payment(req, db)
 
 
@@ -3396,12 +3449,16 @@ def public_cabinet_revoke_config(payload: dict[str, Any], request: Request, db: 
         revoked += 1
     db.commit()
     all_errors = list(errors) + list(warnings)
+    local_only = any("local revoke only" in str(item or "").lower() for item in warnings)
+    failed_count = max(0, len(rows) - int(revoked))
     if revoked <= 0 and all_errors:
         raise HTTPException(status_code=502, detail=f"VPN revoke failed: {all_errors[0]}")
     return {
         "status": "ok",
         "config_id": int(target_cfg.id),
         "revoked_count": int(revoked),
+        "failed_count": int(failed_count),
+        "revoked_mode": "local_only" if local_only else "remote",
         "errors": all_errors,
     }
 
@@ -3856,10 +3913,49 @@ def disable_server(server_id: int, db: Session = Depends(get_db)):
     return {"status": "ok"}
 
 
+def _normalize_idempotency_key(raw: str | None) -> str:
+    value = str(raw or "").strip().lower()
+    if not value:
+        return ""
+    cleaned = "".join(ch for ch in value if ch.isalnum() or ch in ("-", "_", "."))
+    return cleaned[:80]
+
+
 @api_payments.post("/create", dependencies=[Depends(require_internal_token)])
 def create_payment(payload: CreatePaymentRequest, db: Session = Depends(get_db)):
     user = get_or_create_user(db, payload.telegram_id)
     amount_rub = int(payload.amount_rub)
+    idem_key = _normalize_idempotency_key(payload.idempotency_key)
+    gateway_requested = (payload.gateway or settings.payment_gateway or "cryptopay").strip().lower()
+    gateway = gateway_requested
+    platega_payment_method: int | None = None
+    if gateway_requested in {"platega_crypto", "platega_card", "platega_sbp"}:
+        gateway = "platega"
+        platega_payment_method = _platega_payment_method_for_gateway_code(gateway_requested)
+    if gateway not in ("cryptopay", "yoomoney", "platega"):
+        raise HTTPException(status_code=400, detail="Unsupported payment gateway")
+
+    if idem_key:
+        existing = db.scalar(
+            select(PaymentInvoice)
+            .where(PaymentInvoice.user_id == user.id, PaymentInvoice.idempotency_key == idem_key)
+            .order_by(PaymentInvoice.created_at.desc())
+        )
+        if existing and str(existing.status or "").lower() in {"active", "pending", "created", "processing"}:
+            return {
+                "invoice_id": existing.invoice_id,
+                "status": existing.status,
+                "amount_rub": existing.amount_rub,
+                "payable_rub": existing.payable_rub,
+                "promo_code": existing.promo_code_text,
+                "promo_discount_percent": existing.promo_discount_percent,
+                "kind": existing.kind,
+                "gateway": gateway_requested if gateway_requested else gateway,
+                "pay_url": existing.pay_url,
+                "created_at": existing.created_at,
+                "idempotency_key": existing.idempotency_key,
+                "idempotent_reuse": True,
+            }
     if amount_rub < settings.min_topup_rub or amount_rub > settings.max_topup_rub:
         raise HTTPException(
             status_code=400,
@@ -3881,14 +3977,35 @@ def create_payment(payload: CreatePaymentRequest, db: Session = Depends(get_db))
                 promo_code_text = pending.code
                 applied_discount_promo = pending
 
-    gateway_requested = (payload.gateway or settings.payment_gateway or "cryptopay").strip().lower()
-    gateway = gateway_requested
-    platega_payment_method: int | None = None
-    if gateway_requested in {"platega_crypto", "platega_card", "platega_sbp"}:
-        gateway = "platega"
-        platega_payment_method = _platega_payment_method_for_gateway_code(gateway_requested)
-    if gateway not in ("cryptopay", "yoomoney", "platega"):
-        raise HTTPException(status_code=400, detail="Unsupported payment gateway")
+    # Anti-double-click fallback for clients without idempotency key:
+    # reuse an active invoice created recently with same amount and gateway.
+    if not idem_key:
+        recent_active = db.scalar(
+            select(PaymentInvoice)
+            .where(
+                PaymentInvoice.user_id == user.id,
+                PaymentInvoice.amount_rub == amount_rub,
+                PaymentInvoice.kind == f"topup_{gateway}",
+                PaymentInvoice.status.in_(("active", "pending", "created", "processing")),
+                PaymentInvoice.created_at >= utc_now() - timedelta(minutes=2),
+            )
+            .order_by(PaymentInvoice.created_at.desc())
+        )
+        if recent_active:
+            return {
+                "invoice_id": recent_active.invoice_id,
+                "status": recent_active.status,
+                "amount_rub": recent_active.amount_rub,
+                "payable_rub": recent_active.payable_rub,
+                "promo_code": recent_active.promo_code_text,
+                "promo_discount_percent": recent_active.promo_discount_percent,
+                "kind": recent_active.kind,
+                "gateway": gateway_requested if gateway_requested else gateway,
+                "pay_url": recent_active.pay_url,
+                "created_at": recent_active.created_at,
+                "idempotency_key": recent_active.idempotency_key,
+                "idempotent_reuse": True,
+            }
     try:
         if gateway == "yoomoney":
             invoice = yoomoney_create_invoice(db, payload.telegram_id, payable_rub)
@@ -3916,6 +4033,7 @@ def create_payment(payload: CreatePaymentRequest, db: Session = Depends(get_db))
         kind=f"topup_{gateway}",
         promo_code_text=promo_code_text,
         promo_discount_percent=promo_discount_percent,
+        idempotency_key=idem_key or None,
         credited_rub=0,
         referral_bonus_rub=0,
         pay_url=str(invoice["pay_url"]),
@@ -3947,6 +4065,8 @@ def create_payment(payload: CreatePaymentRequest, db: Session = Depends(get_db))
         "gateway": gateway_requested if gateway_requested else gateway,
         "pay_url": payment.pay_url,
         "created_at": payment.created_at,
+        "idempotency_key": payment.idempotency_key,
+        "idempotent_reuse": False,
     }
 
 

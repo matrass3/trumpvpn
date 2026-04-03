@@ -345,6 +345,19 @@ a {
   border-top: 1px solid var(--line);
 }
 
+.quick-amounts {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.muted-text {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .action-row {
   margin-top: 12px;
   display: flex;
@@ -451,6 +464,12 @@ a {
 .chip-btn:hover {
   transform: translateY(-1px);
   border-color: rgba(132, 182, 255, 0.5);
+}
+
+.chip-btn.active {
+  border-color: rgba(47, 201, 255, 0.65);
+  background: rgba(47, 201, 255, 0.16);
+  color: #e6f7ff;
 }
 
 .notif-btn {

@@ -6,6 +6,25 @@
         ready?: () => void;
         expand?: () => void;
         openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
+        openTelegramLink?: (url: string) => void;
+        colorScheme?: "light" | "dark";
+        MainButton?: {
+          isVisible?: boolean;
+          setText?: (text: string) => void;
+          show?: () => void;
+          hide?: () => void;
+          enable?: () => void;
+          disable?: () => void;
+          onClick?: (cb: () => void) => void;
+          offClick?: (cb: () => void) => void;
+        };
+        BackButton?: {
+          isVisible?: boolean;
+          show?: () => void;
+          hide?: () => void;
+          onClick?: (cb: () => void) => void;
+          offClick?: (cb: () => void) => void;
+        };
         HapticFeedback?: {
           impactOccurred?: (style: "light" | "medium" | "heavy" | "rigid" | "soft") => void;
           notificationOccurred?: (kind: "error" | "success" | "warning") => void;
