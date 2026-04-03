@@ -1119,13 +1119,13 @@ GIVEAWAY_MIN_DEPOSIT_RUB = 50
 
 FORTUNE_SPIN_PRICE_RUB = 19
 FORTUNE_PRIZES: list[dict[str, Any]] = [
-    {"id": "rub_100", "label": "100 RUB", "kind": "balance_rub", "value_int": 100, "weight": 1, "color": "#facc15"},
-    {"id": "days_7", "label": "7 days subscription", "kind": "subscription_days", "value_int": 7, "weight": 2, "color": "#ef4444"},
-    {"id": "days_1", "label": "1 day subscription", "kind": "subscription_days", "value_int": 1, "weight": 6, "color": "#3b82f6"},
-    {"id": "rub_5", "label": "5 RUB", "kind": "balance_rub", "value_int": 5, "weight": 10, "color": "#a855f7"},
-    {"id": "rub_1", "label": "1 RUB", "kind": "balance_rub", "value_int": 1, "weight": 12, "color": "#60a5fa"},
-    {"id": "try_next", "label": "Try next time", "kind": "nothing", "value_int": 0, "weight": 14, "color": "#64748b"},
-    {"id": "nothing", "label": "Nothing", "kind": "nothing", "value_int": 0, "weight": 16, "color": "#6b4b5e"},
+    {"id": "rub_100", "label": "100 RUB", "kind": "balance_rub", "value_int": 100, "weight": 1, "color": "#facc15", "emoji": "💰"},
+    {"id": "days_7", "label": "7 days subscription", "kind": "subscription_days", "value_int": 7, "weight": 2, "color": "#ef4444", "emoji": "📅"},
+    {"id": "days_1", "label": "1 day subscription", "kind": "subscription_days", "value_int": 1, "weight": 6, "color": "#3b82f6", "emoji": "🗓️"},
+    {"id": "rub_5", "label": "5 RUB", "kind": "balance_rub", "value_int": 5, "weight": 10, "color": "#a855f7", "emoji": "💸"},
+    {"id": "rub_1", "label": "1 RUB", "kind": "balance_rub", "value_int": 1, "weight": 12, "color": "#60a5fa", "emoji": "🪙"},
+    {"id": "try_next", "label": "Try next time", "kind": "nothing", "value_int": 0, "weight": 14, "color": "#64748b", "emoji": "🍀"},
+    {"id": "nothing", "label": "Nothing", "kind": "nothing", "value_int": 0, "weight": 16, "color": "#6b4b5e", "emoji": "🙃"},
 ]
 
 
@@ -1137,6 +1137,7 @@ def _fortune_prize_public_item(prize: dict[str, Any]) -> dict[str, Any]:
         "value_int": int(prize.get("value_int") or 0),
         "weight": int(prize.get("weight") or 0),
         "color": str(prize.get("color") or "#64748b"),
+        "emoji": str(prize.get("emoji") or "🎁"),
     }
 
 

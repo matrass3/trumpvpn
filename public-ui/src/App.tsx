@@ -37,7 +37,7 @@ type CabinetSnapshot = {
     reason: string;
     balance_rub: number;
     subscription_active: boolean;
-    prizes: Array<{ id: string; label: string; kind: string; value_int: number; weight: number; color: string }>;
+    prizes: Array<{ id: string; label: string; kind: string; value_int: number; weight: number; color: string; emoji: string }>;
     recent: Array<{
       id: number;
       price_rub: number;
@@ -1444,6 +1444,19 @@ function CabinetPage() {
                   <div className="fortune-wheel-wrap">
                     <div className="fortune-pointer" />
                     <div className="fortune-wheel" style={{ backgroundImage: fortuneGradient, transform: `rotate(${fortuneWheelDeg}deg)` }}>
+                      {fortunePrizes.map((item, idx) => {
+                        const segAngle = 360 / fortuneSegCount;
+                        const angle = idx * segAngle + segAngle / 2;
+                        return (
+                          <span
+                            key={item.id}
+                            className="fortune-segment-emoji"
+                            style={{ transform: `rotate(${angle}deg) translateY(-112px) rotate(${-angle}deg)` }}
+                          >
+                            {item.emoji || "🎁"}
+                          </span>
+                        );
+                      })}
                       {Array.from({ length: fortuneSegCount }).map((_, idx) => (
                         <span
                           key={idx}
@@ -1481,7 +1494,7 @@ function CabinetPage() {
                     {fortunePrizes.map((item) => (
                       <div key={item.id} className="fortune-prize-row">
                         <span className="fortune-prize-dot" style={{ background: item.color }} />
-                        <span>{item.label}</span>
+                        <span>{item.emoji || "🎁"} {item.label}</span>
                       </div>
                     ))}
                     {!fortunePrizes.length ? <div className="empty">No prize configuration.</div> : null}
