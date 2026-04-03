@@ -1854,6 +1854,12 @@ def _derive_device_name_from_subscription_request(request: Request) -> str | Non
     user_agent_lc = user_agent.lower()
     app_name = _subscription_client_app_name(user_agent)
 
+    # HApp should consume the full subscription pool and not create per-installation
+    # auto device ids on each import/open. Device auto-attach for HApp leads to
+    # fragmented partial sets when a new happ_* id appears.
+    if app_name == "happ":
+        return None
+
     # Auto-attach for known VPN clients even without explicit query params.
     # This lets one subscription URL account for separate apps/devices.
     browser_markers = ("mozilla/", "chrome/", "safari/", "edg/", "firefox/")
