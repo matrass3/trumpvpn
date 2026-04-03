@@ -318,6 +318,27 @@ def run_sqlite_migrations() -> None:
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_giveaway_participants_giveaway_user ON giveaway_participants (giveaway_id, user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS ix_giveaway_participants_giveaway_id ON giveaway_participants (giveaway_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS ix_giveaway_participants_user_id ON giveaway_participants (user_id)")
+        if not _sqlite_table_exists(conn, "fortune_spins"):
+            conn.execute(
+                """
+                CREATE TABLE fortune_spins (
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    price_rub INTEGER NOT NULL DEFAULT 0,
+                    prize_id TEXT NOT NULL,
+                    prize_label TEXT NOT NULL,
+                    prize_kind TEXT NOT NULL,
+                    prize_value_int INTEGER NOT NULL DEFAULT 0,
+                    reward_rub INTEGER NOT NULL DEFAULT 0,
+                    reward_days INTEGER NOT NULL DEFAULT 0,
+                    balance_before INTEGER NOT NULL DEFAULT 0,
+                    balance_after INTEGER NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_fortune_spins_user_id ON fortune_spins (user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_fortune_spins_created_at ON fortune_spins (created_at)")
         conn.commit()
     finally:
         conn.close()
@@ -507,6 +528,23 @@ class GiveawayWinner(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     user: Mapped[User] = relationship(foreign_keys=[user_id])
+
+
+class FortuneSpin(Base):
+    __tablename__ = "fortune_spins"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    price_rub: Mapped[int] = mapped_column(Integer, default=0)
+    prize_id: Mapped[str] = mapped_column(String(32))
+    prize_label: Mapped[str] = mapped_column(String(128))
+    prize_kind: Mapped[str] = mapped_column(String(32))
+    prize_value_int: Mapped[int] = mapped_column(Integer, default=0)
+    reward_rub: Mapped[int] = mapped_column(Integer, default=0)
+    reward_days: Mapped[int] = mapped_column(Integer, default=0)
+    balance_before: Mapped[int] = mapped_column(Integer, default=0)
+    balance_after: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
 
 class ReferralReward(Base):
@@ -855,6 +893,7 @@ def _public_cabinet_payload(db: Session, user: User) -> dict[str, Any]:
     invited_count, total_bonus = user_referral_stats(db, int(user.id))
     active = active_giveaways(telegram_id=int(user.telegram_id), db=db)
     payments = list_payments(int(user.telegram_id), db=db)
+    fortune = _fortune_state_for_user(db, user)
     return {
         "user": serialize_user(user, invited_count=invited_count, referral_bonus_rub=total_bonus),
         "plans": [
@@ -875,6 +914,7 @@ def _public_cabinet_payload(db: Session, user: User) -> dict[str, Any]:
             "price_rub": int(settings.subscription_price_rub),
         },
         "giveaways": active,
+        "fortune": fortune,
         "payments": payments,
     }
 
@@ -1076,6 +1116,123 @@ GIVEAWAY_KINDS = {
 }
 GIVEAWAY_MAX_ACTIVE = 3
 GIVEAWAY_MIN_DEPOSIT_RUB = 50
+
+FORTUNE_SPIN_PRICE_RUB = 19
+FORTUNE_PRIZES: list[dict[str, Any]] = [
+    {"id": "rub_100", "label": "100 RUB", "kind": "balance_rub", "value_int": 100, "weight": 1, "color": "#facc15"},
+    {"id": "days_7", "label": "7 days subscription", "kind": "subscription_days", "value_int": 7, "weight": 2, "color": "#ef4444"},
+    {"id": "days_1", "label": "1 day subscription", "kind": "subscription_days", "value_int": 1, "weight": 6, "color": "#3b82f6"},
+    {"id": "rub_5", "label": "5 RUB", "kind": "balance_rub", "value_int": 5, "weight": 10, "color": "#a855f7"},
+    {"id": "rub_1", "label": "1 RUB", "kind": "balance_rub", "value_int": 1, "weight": 12, "color": "#60a5fa"},
+    {"id": "try_next", "label": "Try next time", "kind": "nothing", "value_int": 0, "weight": 14, "color": "#64748b"},
+    {"id": "nothing", "label": "Nothing", "kind": "nothing", "value_int": 0, "weight": 16, "color": "#6b4b5e"},
+]
+
+
+def _fortune_prize_public_item(prize: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(prize.get("id") or ""),
+        "label": str(prize.get("label") or ""),
+        "kind": str(prize.get("kind") or ""),
+        "value_int": int(prize.get("value_int") or 0),
+        "weight": int(prize.get("weight") or 0),
+        "color": str(prize.get("color") or "#64748b"),
+    }
+
+
+def _fortune_pick_prize() -> dict[str, Any]:
+    pool = list(FORTUNE_PRIZES)
+    weights = [max(1, int(item.get("weight") or 1)) for item in pool]
+    return random.choices(pool, weights=weights, k=1)[0]
+
+
+def _fortune_spin_to_dict(item: FortuneSpin) -> dict[str, Any]:
+    return {
+        "id": int(item.id),
+        "price_rub": int(item.price_rub or 0),
+        "prize_id": str(item.prize_id or ""),
+        "prize_label": str(item.prize_label or ""),
+        "prize_kind": str(item.prize_kind or ""),
+        "prize_value_int": int(item.prize_value_int or 0),
+        "reward_rub": int(item.reward_rub or 0),
+        "reward_days": int(item.reward_days or 0),
+        "balance_before": int(item.balance_before or 0),
+        "balance_after": int(item.balance_after or 0),
+        "created_at": _fmt_dt(item.created_at),
+    }
+
+
+def _fortune_recent_spins(db: Session, user_id: int, limit: int = 15) -> list[dict[str, Any]]:
+    rows = db.scalars(
+        select(FortuneSpin)
+        .where(FortuneSpin.user_id == int(user_id))
+        .order_by(FortuneSpin.created_at.desc(), FortuneSpin.id.desc())
+        .limit(max(1, int(limit)))
+    ).all()
+    return [_fortune_spin_to_dict(item) for item in rows]
+
+
+def _fortune_state_for_user(db: Session, user: User, include_recent_limit: int = 15) -> dict[str, Any]:
+    balance = int(user.balance_rub or 0)
+    active_sub = is_subscription_active(user)
+    can_spin = active_sub and balance >= int(FORTUNE_SPIN_PRICE_RUB)
+    reason = ""
+    if not active_sub:
+        reason = "Active subscription required"
+    elif balance < int(FORTUNE_SPIN_PRICE_RUB):
+        reason = f"Need {FORTUNE_SPIN_PRICE_RUB} RUB to spin"
+
+    return {
+        "price_rub": int(FORTUNE_SPIN_PRICE_RUB),
+        "can_spin": bool(can_spin),
+        "reason": reason,
+        "balance_rub": balance,
+        "subscription_active": bool(active_sub),
+        "prizes": [_fortune_prize_public_item(item) for item in FORTUNE_PRIZES],
+        "recent": _fortune_recent_spins(db, int(user.id), limit=include_recent_limit),
+    }
+
+
+def _apply_fortune_spin(db: Session, user: User) -> dict[str, Any]:
+    balance_before = int(user.balance_rub or 0)
+    price = int(FORTUNE_SPIN_PRICE_RUB)
+    if not is_subscription_active(user):
+        raise HTTPException(status_code=400, detail="Active subscription required for Fortune Wheel")
+    if balance_before < price:
+        missing = price - balance_before
+        raise HTTPException(status_code=400, detail=f"Insufficient balance. Need {price} RUB, missing {missing} RUB")
+
+    user.balance_rub = balance_before - price
+    prize = _fortune_pick_prize()
+    prize_kind = str(prize.get("kind") or "nothing")
+    prize_value_int = int(prize.get("value_int") or 0)
+    reward_rub = 0
+    reward_days = 0
+    if prize_kind == "balance_rub" and prize_value_int > 0:
+        reward_rub = prize_value_int
+        user.balance_rub = int(user.balance_rub or 0) + reward_rub
+    elif prize_kind == "subscription_days" and prize_value_int > 0:
+        reward_days = prize_value_int
+        _apply_subscription_days_no_commit(user, reward_days)
+
+    balance_after = int(user.balance_rub or 0)
+    spin = FortuneSpin(
+        user_id=int(user.id),
+        price_rub=price,
+        prize_id=str(prize.get("id") or ""),
+        prize_label=str(prize.get("label") or ""),
+        prize_kind=prize_kind,
+        prize_value_int=prize_value_int,
+        reward_rub=reward_rub,
+        reward_days=reward_days,
+        balance_before=balance_before,
+        balance_after=balance_after,
+    )
+    db.add(spin)
+    db.commit()
+    db.refresh(user)
+    db.refresh(spin)
+    return _fortune_spin_to_dict(spin)
 
 
 def _is_giveaway_active(giveaway: Giveaway, now: datetime | None = None) -> bool:
@@ -3466,6 +3623,25 @@ def public_cabinet_join_giveaway(payload: dict[str, Any], request: Request, db: 
     user = _public_user_from_request(request, db)
     giveaway_id = int(payload.get("giveaway_id") or 0)
     return join_giveaway({"telegram_id": int(user.telegram_id), "giveaway_id": giveaway_id}, db)
+
+
+@app.get("/api/public/cabinet/fortune")
+def public_cabinet_fortune(request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    return _fortune_state_for_user(db, user)
+
+
+@app.post("/api/public/cabinet/fortune/spin")
+def public_cabinet_fortune_spin(request: Request, db: Session = Depends(get_db)):
+    user = _public_user_from_request(request, db)
+    result = _apply_fortune_spin(db, user)
+    user = fetch_user_with_configs(db, int(user.telegram_id)) or user
+    return {
+        "ok": True,
+        "result": result,
+        "fortune": _fortune_state_for_user(db, user),
+        "user": serialize_user(user),
+    }
 
 
 @app.post("/api/public/cabinet/configs/revoke")

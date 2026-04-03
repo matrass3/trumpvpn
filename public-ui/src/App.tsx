@@ -31,6 +31,27 @@ type CabinetSnapshot = {
   plans: Array<{ id: string; label: string; months: number; price_rub: number; badge: string; days: number }>;
   payment: { min_topup_rub: number; max_topup_rub: number };
   giveaways: Array<{ id: number; title: string; description: string; prize: string; kind: string; joined: boolean; participants: number }>;
+  fortune: {
+    price_rub: number;
+    can_spin: boolean;
+    reason: string;
+    balance_rub: number;
+    subscription_active: boolean;
+    prizes: Array<{ id: string; label: string; kind: string; value_int: number; weight: number; color: string }>;
+    recent: Array<{
+      id: number;
+      price_rub: number;
+      prize_id: string;
+      prize_label: string;
+      prize_kind: string;
+      prize_value_int: number;
+      reward_rub: number;
+      reward_days: number;
+      balance_before: number;
+      balance_after: number;
+      created_at: string;
+    }>;
+  };
   payments: Array<{ invoice_id: number; status: string; amount_rub: number; kind: string; created_at: string; paid_at: string | null; pay_url: string }>;
 };
 
@@ -394,6 +415,8 @@ function CabinetPage() {
   const [protocolFilter, setProtocolFilter] = useState("all");
   const [revokeCandidate, setRevokeCandidate] = useState<CabinetConfig | null>(null);
   const [quickAmount, setQuickAmount] = useState(500);
+  const [fortuneWheelDeg, setFortuneWheelDeg] = useState(0);
+  const [fortuneLastPrizeId, setFortuneLastPrizeId] = useState("");
   const noticeSeq = useRef(0);
   const previousSnapshot = useRef<CabinetSnapshot | null>(null);
   const expiryMarker = useRef("");
@@ -921,6 +944,47 @@ function CabinetPage() {
       triggerNotify("success");
     });
   }
+
+  async function spinFortuneWheel() {
+    if (!snapshot) return;
+    triggerImpact("heavy");
+    setActionPending(true);
+    try {
+      const result = await apiJson<{
+        ok: boolean;
+        result: { prize_id: string; prize_label: string; reward_rub: number; reward_days: number };
+      }>("/api/public/cabinet/fortune/spin", { method: "POST" });
+      const prizes = snapshot.fortune?.prizes || [];
+      const winnerId = String(result?.result?.prize_id || "");
+      const winnerIndex = Math.max(0, prizes.findIndex((item) => String(item.id || "") === winnerId));
+      const segAngle = prizes.length > 0 ? 360 / prizes.length : 360;
+      const stopOffset = ((360 - (winnerIndex + 0.5) * segAngle) % 360 + 360) % 360;
+      setFortuneWheelDeg((prev) => prev + 5 * 360 + stopOffset);
+      setFortuneLastPrizeId(winnerId);
+      trackEvent("fortune_spin", { prize_id: winnerId, reward_rub: result?.result?.reward_rub || 0, reward_days: result?.result?.reward_days || 0 });
+      if ((result?.result?.reward_rub || 0) > 0) {
+        pushNotice("success", `You won ${fmtRub(result.result.reward_rub)}.`, "Fortune");
+      } else if ((result?.result?.reward_days || 0) > 0) {
+        pushNotice("success", `You won ${result.result.reward_days} subscription day(s).`, "Fortune");
+      } else {
+        pushNotice("info", `Prize: ${result?.result?.prize_label || "Try next time"}.`, "Fortune");
+      }
+      triggerNotify("success");
+      await refresh();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Spin failed";
+      if (isAuthError(msg)) {
+        setUnauthorized(true);
+        setSnapshot(null);
+      } else {
+        pushNotice("error", msg, "Fortune");
+        triggerNotify("error");
+      }
+    } finally {
+      setActionPending(false);
+    }
+  }
+
   async function doRevokeConfig(configId: number) {
     await withAction(async () => {
       const result = await apiJson<{ status: string; revoked_count?: number; revoked_mode?: string; failed_count?: number }>("/api/public/cabinet/configs/revoke", {
@@ -996,6 +1060,24 @@ function CabinetPage() {
     const raw = [quickAmount, 300, 500, 1000, 2000];
     return Array.from(new Set(raw.map((item) => Math.min(max, Math.max(min, Number(item || 0)))))).sort((a, b) => a - b);
   }, [snapshot?.payment.min_topup_rub, snapshot?.payment.max_topup_rub, quickAmount]);
+  const fortune = snapshot?.fortune;
+  const fortunePrizes = fortune?.prizes || [];
+  const fortuneRecent = fortune?.recent || [];
+  const fortuneSegCount = Math.max(1, fortunePrizes.length || 1);
+  const fortuneGradient = useMemo(() => {
+    if (!fortunePrizes.length) return "conic-gradient(from -90deg, #1f2f4e 0deg 360deg)";
+    const seg = 360 / fortunePrizes.length;
+    const chunks = fortunePrizes.map((item, idx) => {
+      const start = idx * seg;
+      const end = (idx + 1) * seg;
+      return `${item.color || "#64748b"} ${start}deg ${end}deg`;
+    });
+    return `conic-gradient(from -90deg, ${chunks.join(", ")})`;
+  }, [fortunePrizes]);
+  const fortuneActivePrize = useMemo(() => {
+    if (!fortuneLastPrizeId) return null;
+    return fortunePrizes.find((item) => String(item.id || "") === fortuneLastPrizeId) || null;
+  }, [fortunePrizes, fortuneLastPrizeId]);
 
   return (
     <main className="cabinet-root">
@@ -1355,10 +1437,71 @@ function CabinetPage() {
             {section === "giveaways" ? (
               <section className="stack">
                 <article className="panel">
-                  <h2>Fortune wheel and giveaways</h2>
-                  <p>Join active campaigns and check your status.</p>
+                  <h2>Fortune Wheel</h2>
+                  <p>Spin cost: {fmtRub(fortune?.price_rub || 19)}. Prize is credited instantly.</p>
+                </article>
+                <article className="panel fortune-panel">
+                  <div className="fortune-wheel-wrap">
+                    <div className="fortune-pointer" />
+                    <div className="fortune-wheel" style={{ backgroundImage: fortuneGradient, transform: `rotate(${fortuneWheelDeg}deg)` }}>
+                      {Array.from({ length: fortuneSegCount }).map((_, idx) => (
+                        <span
+                          key={idx}
+                          className="fortune-mark"
+                          style={{ transform: `rotate(${(360 / fortuneSegCount) * idx}deg)` }}
+                        />
+                      ))}
+                    </div>
+                    <div className="fortune-center">SPIN</div>
+                  </div>
+                  <div className="fortune-meta">
+                    <div className="status-pill neutral">Balance: {fmtRub(snapshot.user.balance_rub)}</div>
+                    <div className={`status-pill ${snapshot.user.subscription_active ? "ok" : "off"}`}>
+                      {snapshot.user.subscription_active ? "Subscription active" : "Subscription inactive"}
+                    </div>
+                  </div>
+                  {fortune?.reason ? <p className="muted-text">{fortune.reason}</p> : null}
+                  <div className="action-row">
+                    <button className="ui-btn primary" type="button" onClick={() => void spinFortuneWheel()} disabled={actionPending || !fortune?.can_spin}>
+                      Spin for {fmtRub(fortune?.price_rub || 19)}
+                    </button>
+                    <button className="ui-btn ghost" type="button" onClick={() => navigate("balance")}>
+                      Top up balance
+                    </button>
+                  </div>
+                  {fortuneActivePrize ? (
+                    <p className="muted-text">
+                      Last prize: <strong>{fortuneActivePrize.label}</strong>
+                    </p>
+                  ) : null}
+                </article>
+                <article className="panel">
+                  <h3>Prize pool</h3>
+                  <div className="fortune-prize-list">
+                    {fortunePrizes.map((item) => (
+                      <div key={item.id} className="fortune-prize-row">
+                        <span className="fortune-prize-dot" style={{ background: item.color }} />
+                        <span>{item.label}</span>
+                      </div>
+                    ))}
+                    {!fortunePrizes.length ? <div className="empty">No prize configuration.</div> : null}
+                  </div>
+                </article>
+                <article className="panel">
+                  <h3>Recent spins</h3>
+                  <div className="payments-list">
+                    {fortuneRecent.slice(0, 8).map((item) => (
+                      <div key={item.id} className="payment-item">
+                        <span>{item.prize_label}</span>
+                        <span>{item.reward_rub > 0 ? `+${fmtRub(item.reward_rub)}` : item.reward_days > 0 ? `+${item.reward_days} day(s)` : "No reward"}</span>
+                        <span>{item.created_at}</span>
+                      </div>
+                    ))}
+                    {!fortuneRecent.length ? <div className="empty">No spins yet.</div> : null}
+                  </div>
                 </article>
                 <article className="panel plan-list">
+                  <h3>Active giveaways</h3>
                   {snapshot.giveaways.map((item) => (
                     <div key={item.id} className="plan-row">
                       <div>
