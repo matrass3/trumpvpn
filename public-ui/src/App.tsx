@@ -1447,7 +1447,7 @@ function CabinetPage() {
                     <div className="fortune-wheel" style={{ backgroundImage: fortuneGradient, transform: `rotate(${fortuneWheelDeg}deg)` }}>
                       {fortunePrizes.map((item, idx) => {
                         const segAngle = 360 / fortuneSegCount;
-                        const angle = idx * segAngle + segAngle / 2;
+                        const angle = -90 + idx * segAngle + segAngle / 2;
                         return (
                           <span
                             key={item.id}
@@ -1462,7 +1462,7 @@ function CabinetPage() {
                         <span
                           key={idx}
                           className="fortune-mark"
-                          style={{ transform: `rotate(${(360 / fortuneSegCount) * idx}deg)` }}
+                          style={{ transform: `rotate(${-90 + (360 / fortuneSegCount) * idx}deg)` }}
                         />
                       ))}
                     </div>
