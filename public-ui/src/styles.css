@@ -348,9 +348,15 @@ a {
   left: 50%;
   top: 50%;
   transform-origin: center center;
-  font-size: 24px;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+  line-height: 1;
   text-shadow: 0 3px 10px rgba(0, 0, 0, 0.38);
   z-index: 2;
+  pointer-events: none;
 }
 
 .fortune-pointer {

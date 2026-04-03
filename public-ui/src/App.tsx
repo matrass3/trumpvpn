@@ -1064,6 +1064,7 @@ function CabinetPage() {
   const fortunePrizes = fortune?.prizes || [];
   const fortuneRecent = fortune?.recent || [];
   const fortuneSegCount = Math.max(1, fortunePrizes.length || 1);
+  const fortuneEmojiRadius = 104;
   const fortuneGradient = useMemo(() => {
     if (!fortunePrizes.length) return "conic-gradient(from -90deg, #1f2f4e 0deg 360deg)";
     const seg = 360 / fortunePrizes.length;
@@ -1451,7 +1452,7 @@ function CabinetPage() {
                           <span
                             key={item.id}
                             className="fortune-segment-emoji"
-                            style={{ transform: `rotate(${angle}deg) translateY(-112px) rotate(${-angle}deg)` }}
+                            style={{ transform: `translate(-50%, -50%) rotate(${angle}deg) translateY(-${fortuneEmojiRadius}px) rotate(${-angle}deg)` }}
                           >
                             {item.emoji || "🎁"}
                           </span>
