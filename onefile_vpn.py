@@ -1884,6 +1884,7 @@ def _provision_single_auto_device_config(
     device_name: str,
     max_configs: int,
     timeout_seconds: float = 5.0,
+    total_timeout_seconds: float = 20.0,
 ) -> ClientConfig | None:
     existing_active = db.scalars(
         select(ClientConfig)
@@ -1901,7 +1902,7 @@ def _provision_single_auto_device_config(
 
     existing_by_server: dict[int, ClientConfig] = {int(cfg.server_id): cfg for cfg in by_device}
     created: list[ClientConfig] = []
-    deadline = time.monotonic() + 8.0
+    deadline = time.monotonic() + max(3.0, float(total_timeout_seconds))
     for server in enabled_servers:
         sid = int(server.id)
         if sid in existing_by_server:
@@ -3095,6 +3096,28 @@ def _prepare_user_subscription_data(
                 active_configs = sorted(requested_configs, key=lambda cfg: cfg.created_at, reverse=True)
             else:
                 active_configs = _active_subscription_configs(user, max_configs)
+
+    # For HApp imports, try to backfill missing server configs for one existing device,
+    # so subscription list contains all enabled servers.
+    if client_app_name == "happ":
+        device_candidates: list[str] = []
+        if requested_device_name:
+            device_candidates.append(str(requested_device_name))
+        for cfg in list(active_configs or []):
+            name = str(cfg.device_name or "").strip()
+            if name and name not in device_candidates:
+                device_candidates.append(name)
+        if device_candidates:
+            _provision_single_auto_device_config(
+                db,
+                user,
+                device_candidates[0],
+                max_configs=max_configs,
+                timeout_seconds=6.0,
+                total_timeout_seconds=35.0,
+            )
+            user = fetch_user_with_configs(db, telegram_id) or user
+            active_configs = _active_subscription_configs(user, max_configs)
 
     # HApp should import full server pool for the account, not just one device slice.
     # Pick one latest active config per server to avoid duplicate entries for the same node.
