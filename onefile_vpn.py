@@ -1119,13 +1119,13 @@ GIVEAWAY_MIN_DEPOSIT_RUB = 50
 
 FORTUNE_SPIN_PRICE_RUB = 29
 FORTUNE_PRIZES: list[dict[str, Any]] = [
-    {"id": "rub_300", "label": "300 RUB", "kind": "balance_rub", "value_int": 300, "weight": 1, "color": "#facc15", "emoji": "💰"},
-    {"id": "days_14", "label": "14 days subscription", "kind": "subscription_days", "value_int": 14, "weight": 2, "color": "#ef4444", "emoji": "📅"},
-    {"id": "days_3", "label": "3 days subscription", "kind": "subscription_days", "value_int": 3, "weight": 6, "color": "#3b82f6", "emoji": "🗓️"},
-    {"id": "rub_25", "label": "25 RUB", "kind": "balance_rub", "value_int": 25, "weight": 10, "color": "#a855f7", "emoji": "💸"},
-    {"id": "rub_5", "label": "5 RUB", "kind": "balance_rub", "value_int": 5, "weight": 12, "color": "#60a5fa", "emoji": "🪙"},
-    {"id": "reroll", "label": "Reroll", "kind": "reroll", "value_int": 0, "weight": 14, "color": "#64748b", "emoji": "🍀"},
-    {"id": "nothing", "label": "Nothing", "kind": "nothing", "value_int": 0, "weight": 16, "color": "#6b4b5e", "emoji": "🙃"},
+    {"id": "rub_300", "label": "300 рублей", "kind": "balance_rub", "value_int": 300, "weight": 1, "color": "#facc15", "emoji": "💰"},
+    {"id": "days_14", "label": "14 дней подписки", "kind": "subscription_days", "value_int": 14, "weight": 2, "color": "#ef4444", "emoji": "📅"},
+    {"id": "days_3", "label": "3 дня подписки", "kind": "subscription_days", "value_int": 3, "weight": 6, "color": "#3b82f6", "emoji": "🗓️"},
+    {"id": "rub_25", "label": "25 рублей", "kind": "balance_rub", "value_int": 25, "weight": 10, "color": "#a855f7", "emoji": "💸"},
+    {"id": "rub_5", "label": "5 рублей", "kind": "balance_rub", "value_int": 5, "weight": 12, "color": "#60a5fa", "emoji": "🪙"},
+    {"id": "reroll", "label": "Перекрут", "kind": "reroll", "value_int": 0, "weight": 14, "color": "#64748b", "emoji": "🍀"},
+    {"id": "nothing", "label": "Ничего", "kind": "nothing", "value_int": 0, "weight": 16, "color": "#6b4b5e", "emoji": "🙃"},
 ]
 
 
@@ -1199,16 +1199,16 @@ def _fortune_state_for_user(db: Session, user: User, include_recent_limit: int =
     can_spin = active_sub and (free_available or balance >= int(FORTUNE_SPIN_PRICE_RUB))
     reason = ""
     if not active_sub:
-        reason = "Active subscription required"
+        reason = "Требуется активная подписка"
     elif (not free_available) and balance < int(FORTUNE_SPIN_PRICE_RUB):
-        reason = f"Need {FORTUNE_SPIN_PRICE_RUB} RUB to spin"
+        reason = f"Для прокрута нужно {FORTUNE_SPIN_PRICE_RUB} рублей"
 
     return {
         "price_rub": int(FORTUNE_SPIN_PRICE_RUB),
         "can_spin": bool(can_spin),
         "reason": reason,
         "free_spin_available": bool(free_available),
-        "next_free_spin_at": _fmt_dt(next_free_at),
+        "next_free_spin_at": next_free_at.isoformat() if next_free_at else "",
         "balance_rub": balance,
         "subscription_active": bool(active_sub),
         "prizes": [_fortune_prize_public_item(item) for item in FORTUNE_PRIZES],
@@ -1221,10 +1221,10 @@ def _apply_fortune_spin(db: Session, user: User) -> dict[str, Any]:
     free_available, _ = _fortune_daily_free_available(db, int(user.id))
     price = 0 if free_available else int(FORTUNE_SPIN_PRICE_RUB)
     if not is_subscription_active(user):
-        raise HTTPException(status_code=400, detail="Active subscription required for Fortune Wheel")
+        raise HTTPException(status_code=400, detail="Для колеса фортуны нужна активная подписка")
     if price > 0 and balance_before < price:
         missing = price - balance_before
-        raise HTTPException(status_code=400, detail=f"Insufficient balance. Need {price} RUB, missing {missing} RUB")
+        raise HTTPException(status_code=400, detail=f"Недостаточно средств. Нужно {price} рублей, не хватает {missing} рублей")
 
     if price > 0:
         user.balance_rub = balance_before - price
@@ -1240,7 +1240,7 @@ def _apply_fortune_spin(db: Session, user: User) -> dict[str, Any]:
         reward_days = prize_value_int
         _apply_subscription_days_no_commit(user, reward_days)
     elif prize_kind == "reroll" and price > 0:
-        # "Reroll" compensates current paid spin cost.
+        # "Перекрут" компенсирует стоимость платного прокрута.
         reward_rub = int(price)
         user.balance_rub = int(user.balance_rub or 0) + reward_rub
 

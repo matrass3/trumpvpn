@@ -87,12 +87,12 @@ type AppNotice = {
 };
 
 const NAV: Array<{ key: CabinetSection; title: string; icon: string }> = [
-  { key: "dashboard", title: "Home", icon: "🏠" },
-  { key: "subscription", title: "Subscription", icon: "✨" },
-  { key: "balance", title: "Balance", icon: "💳" },
-  { key: "referrals", title: "Referrals", icon: "👥" },
-  { key: "giveaways", title: "Fortune", icon: "🎁" },
-  { key: "help", title: "Help", icon: "❓" },
+  { key: "dashboard", title: "ÐÐ»Ð°Ð²Ð½Ð°Ñ", icon: "ð " },
+  { key: "subscription", title: "ÐÐ¾Ð´Ð¿Ð¸ÑÐºÐ°", icon: "â¨" },
+  { key: "balance", title: "ÐÐ°Ð»Ð°Ð½Ñ", icon: "ð³" },
+  { key: "referrals", title: "Ð ÐµÑÐµÑÐ°Ð»Ñ", icon: "ð¥" },
+  { key: "giveaways", title: "Ð¤Ð¾ÑÑÑÐ½Ð°", icon: "ð" },
+  { key: "help", title: "ÐÐ¾Ð¼Ð¾ÑÑ", icon: "â" },
 ];
 
 const GATEWAYS = [
@@ -115,6 +115,18 @@ function fmtDate(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("ru-RU");
 }
 
+function fmtCountdown(value: string | null | undefined, nowMs: number) {
+  if (!value) return "00:00:00";
+  const target = new Date(value);
+  const delta = target.getTime() - nowMs;
+  if (Number.isNaN(target.getTime()) || delta <= 0) return "00:00:00";
+  const totalSeconds = Math.floor(delta / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds].map((item) => String(item).padStart(2, "0")).join(":");
+}
+
 function parseDate(value: string | null | undefined): Date | null {
   if (!value) return null;
   const date = new Date(value);
@@ -131,7 +143,7 @@ function getDaysLeft(value: string | null | undefined) {
 
 function sanitizeError(raw: string) {
   const source = String(raw || "").trim();
-  if (!source) return "Request failed";
+  if (!source) return "Не удалось выполнить запрос";
 
   let extracted = source;
   try {
@@ -150,26 +162,26 @@ function sanitizeError(raw: string) {
   }
 
   const text = extracted.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  if (!text) return "Request failed";
+  if (!text) return "Не удалось выполнить запрос";
 
-  if (/telegram user not found/i.test(text)) return "Telegram user not found. Re-open Mini App from the bot.";
-  if (/signature mismatch|invalid init_data|expired/i.test(text)) return "Telegram session expired. Re-open Mini App from the bot.";
+  if (/telegram user not found/i.test(text)) return "Пользователь Telegram не найден. Откройте Mini App из бота заново.";
+  if (/signature mismatch|invalid init_data|expired/i.test(text)) return "Сессия Telegram истекла. Откройте Mini App из бота заново.";
   if (/vpn revoke failed/i.test(text)) {
     const cfgMatch = text.match(/cfg#(\d+)/i);
     const cfgSuffix = cfgMatch ? ` (cfg #${cfgMatch[1]})` : "";
-    if (/authentication failed/i.test(text)) return `Unable to revoke device${cfgSuffix}: SSH authentication failed.`;
-    if (/jq: error|cannot iterate over null/i.test(text)) return `Unable to revoke device${cfgSuffix}: VPN node config issue.`;
-    return `Unable to revoke device${cfgSuffix}. Try again later.`;
+    if (/authentication failed/i.test(text)) return `Не удалось удалить устройство${cfgSuffix}: ошибка SSH-аутентификации.`;
+    if (/jq: error|cannot iterate over null/i.test(text)) return `Не удалось удалить устройство${cfgSuffix}: проблема конфигурации VPN-узла.`;
+    return `Не удалось удалить устройство${cfgSuffix}. Повторите позже.`;
   }
   const insufficient = text.match(/insufficient balance\.?\s*need\s*(\d+)\s*rub,\s*missing\s*(\d+)\s*rub/i);
   if (insufficient) {
     const need = Number(insufficient[1] || 0);
     const missing = Number(insufficient[2] || 0);
-    return `Insufficient balance: need ${fmtRub(need)}, missing ${fmtRub(missing)}.`;
+    return `Недостаточно средств: нужно ${fmtRub(need)}, не хватает ${fmtRub(missing)}.`;
   }
 
-  if (/unauthorized|401/i.test(text)) return "Authorization required in Telegram Mini App.";
-  if (/502|504|bad gateway|gateway timeout|gateway time-out/i.test(text)) return "Service is temporarily unavailable. Try again in 20-30 seconds.";
+  if (/unauthorized|401/i.test(text)) return "Требуется авторизация в Telegram Mini App.";
+  if (/502|504|bad gateway|gateway timeout|gateway time-out/i.test(text)) return "Сервис временно недоступен. Повторите через 20-30 секунд.";
   return text.slice(0, 320);
 }
 
@@ -213,13 +225,13 @@ function sectionFromPath(pathname: string): CabinetSection {
 
 function planLabel(plan: { label: string; months: number; days: number }) {
   const label = String(plan.label || "").trim();
-  if (label && !label.includes("\uFFFD") && !/\?{3,}/.test(label)) return label;
+  if (label && !label.includes("�") && !/\?{3,}/.test(label)) return label;
   const m = plan.months > 0 ? plan.months : Math.max(1, Math.round(plan.days / 30));
-  if (m === 1) return "1 month";
-  if (m === 3) return "3 months";
-  if (m === 6) return "6 months";
-  if (m === 12) return "1 year";
-  return `${m} months`;
+  if (m === 1) return "1 Ð¼ÐµÑÑÑ";
+  if (m === 3) return "3 Ð¼ÐµÑÑÑÐ°";
+  if (m === 6) return "6 Ð¼ÐµÑÑÑÐµÐ²";
+  if (m === 12) return "1 Ð³Ð¾Ð´";
+  return `${m} Ð¼ÐµÑ.`;
 }
 
 function triggerImpact(style: "light" | "medium" | "heavy" = "light") {
@@ -351,13 +363,13 @@ function LandingPage() {
       <div className="landing-card">
         <p className="landing-kicker">SECURE VPN SERVICE</p>
         <h1>{config.brand}</h1>
-        <p>Fast VPN for phone and desktop. Subscription, balance and access keys in one cabinet.</p>
+        <p>Быстрый VPN для телефона и компьютера. Подписка, баланс и ключи доступа в одном кабинете.</p>
         <div className="landing-actions">
           <a className="ui-btn primary" href="/cabinet">
-            Open Cabinet
+            Открыть кабинет
           </a>
           <a className="ui-btn ghost" href={config.bot_url} target="_blank" rel="noreferrer noopener">
-            Open Telegram Bot
+            Открыть Telegram-бота
           </a>
         </div>
       </div>
@@ -388,10 +400,10 @@ function SkeletonCabinet() {
 }
 
 function noticeTitleByKind(kind: NoticeKind) {
-  if (kind === "success") return "Success";
-  if (kind === "warn") return "Warning";
-  if (kind === "error") return "Error";
-  return "Info";
+  if (kind === "success") return "Успешно";
+  if (kind === "warn") return "Внимание";
+  if (kind === "error") return "Ошибка";
+  return "Инфо";
 }
 
 function CabinetPage() {
@@ -419,6 +431,7 @@ function CabinetPage() {
   const [quickAmount, setQuickAmount] = useState(500);
   const [fortuneWheelDeg, setFortuneWheelDeg] = useState(0);
   const [fortuneLastPrizeId, setFortuneLastPrizeId] = useState("");
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const noticeSeq = useRef(0);
   const previousSnapshot = useRef<CabinetSnapshot | null>(null);
   const expiryMarker = useRef("");
@@ -512,6 +525,11 @@ function CabinetPage() {
   }, []);
 
   useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     const back = window.Telegram?.WebApp?.BackButton;
     if (!back) return;
     const handleBack = () => {
@@ -562,7 +580,7 @@ function CabinetPage() {
       setUnauthorized(false);
       if (!invoiceToCheck && data.payments.length) setInvoiceToCheck(Number(data.payments[0].invoice_id || 0));
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to load cabinet";
+      const msg = err instanceof Error ? err.message : "Не удалось загрузить кабинет";
       if (/unauthorized|401/i.test(msg)) {
         setUnauthorized(true);
         setSnapshot(null);
@@ -587,7 +605,7 @@ function CabinetPage() {
         const currentStatus = String(payment.status || "").toLowerCase();
         const beforeStatus = prevStatus.get(payment.invoice_id);
         if (currentStatus === "paid" && beforeStatus && beforeStatus !== "paid") {
-          pushNotice("success", `Payment #${payment.invoice_id} confirmed: ${fmtRub(payment.amount_rub)}`, "Payment");
+          pushNotice("success", `Оплата #${payment.invoice_id} подтверждена: ${fmtRub(payment.amount_rub)}`, "Оплата");
           trackEvent("invoice_paid", { invoice_id: payment.invoice_id, amount_rub: payment.amount_rub, source: "snapshot_diff" });
           triggerNotify("success");
         }
@@ -598,7 +616,7 @@ function CabinetPage() {
       const marker = `${snapshot.user.subscription_until || ""}:${daysLeft}`;
       if (expiryMarker.current !== marker) {
         expiryMarker.current = marker;
-        pushNotice("warn", `Subscription expires in ${daysLeft} day(s).`, "Subscription");
+        pushNotice("warn", `Подписка закончится через ${daysLeft} дн.`, "Подписка");
       }
     }
     previousSnapshot.current = snapshot;
@@ -610,11 +628,11 @@ function CabinetPage() {
       await action();
       await refresh();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Action failed";
+      const msg = err instanceof Error ? err.message : "Не удалось выполнить действие";
       if (isAuthError(msg)) {
         setUnauthorized(true);
         setSnapshot(null);
-        setMiniAppAuthError("Refreshing session via Telegram Mini App...");
+        setMiniAppAuthError("Обновляю сессию через Telegram Mini App...");
         authRetryStopped.current = false;
         authRetryAttempt.current = 0;
         return;
@@ -645,12 +663,12 @@ function CabinetPage() {
         authRetryAttempt.current = 0;
         authRetryStopped.current = false;
         if (!silent) {
-          pushNotice("success", "Logged in via Telegram Mini App.", "Telegram");
+          pushNotice("success", "Вход через Telegram Mini App выполнен.", "Telegram");
           triggerNotify("success");
         }
         return true;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Mini App auth failed";
+        const msg = err instanceof Error ? err.message : "Ошибка авторизации Mini App";
         setMiniAppAuthError(msg);
         if (shouldStopMiniAppRetry(msg)) {
           authRetryStopped.current = true;
@@ -675,11 +693,11 @@ function CabinetPage() {
       if (!initData) {
         authRetryAttempt.current += 1;
         if (authRetryAttempt.current > 20) {
-          setMiniAppAuthError("Unable to read Telegram Mini App session. Re-open Mini App from bot.");
+          setMiniAppAuthError("Не удалось получить сессию Telegram Mini App. Откройте Mini App из бота заново.");
           authRetryStopped.current = true;
           return false;
         }
-        setMiniAppAuthError("Waiting for Telegram Mini App session...");
+        setMiniAppAuthError("Ожидание сессии Telegram Mini App...");
         authRetryTimer.current = window.setTimeout(() => {
           if (!cancelled) void run(true);
         }, 800);
@@ -731,7 +749,7 @@ function CabinetPage() {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/renew-from-balance", { method: "POST" });
       trackEvent("renew_from_balance");
-      pushNotice("success", "Subscription renewed.");
+      pushNotice("success", "Подписка продлена.");
       triggerNotify("success");
     });
   }
@@ -740,7 +758,7 @@ function CabinetPage() {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/welcome/claim", { method: "POST" });
       trackEvent("welcome_bonus_claimed");
-      pushNotice("success", "Welcome bonus processed.");
+      pushNotice("success", "Приветственный бонус начислен.");
       triggerNotify("success");
     });
   }
@@ -748,18 +766,18 @@ function CabinetPage() {
   async function applyPromo(event: FormEvent) {
     event.preventDefault();
     await withAction(async () => {
-      if (!promoCode.trim()) throw new Error("Enter promo code");
+      if (!promoCode.trim()) throw new Error("Введите промокод");
       await apiJson("/api/public/cabinet/promo/apply", { method: "POST", body: JSON.stringify({ code: promoCode.trim() }) });
       trackEvent("promo_applied", { code: promoCode.trim() });
       setPromoCode("");
-      pushNotice("success", "Promo applied.");
+      pushNotice("success", "Промокод применён.");
       triggerNotify("success");
     });
   }
   const checkInvoiceStatus = useCallback(
     async (invoiceId: number, options?: { silent?: boolean; source?: "manual" | "auto" }) => {
       const id = Number(invoiceId || 0);
-      if (!id) throw new Error("Enter invoice ID");
+      if (!id) throw new Error("Введите ID счёта");
       const source = options?.source || "manual";
       const silent = Boolean(options?.silent);
       const result = await apiJson<{ status: string }>("/api/public/cabinet/payments/check", {
@@ -774,7 +792,7 @@ function CabinetPage() {
         setPendingInvoiceChecks(0);
         setPendingInvoiceId(0);
         triggerNotify("success");
-        if (!silent) pushNotice("success", `Payment #${id} confirmed.`, "Payment");
+        if (!silent) pushNotice("success", `Оплата #${id} подтверждена.`, "Оплата");
         await refresh();
         return statusValue;
       }
@@ -782,10 +800,10 @@ function CabinetPage() {
         pendingInvoiceChecksRef.current = 0;
         setPendingInvoiceChecks(0);
         setPendingInvoiceId(0);
-        if (!silent) pushNotice("warn", `Payment #${id} is ${statusValue}.`, "Payment");
+        if (!silent) pushNotice("warn", `Счёт #${id}: статус ${statusValue}.`, "Оплата");
         return statusValue;
       }
-      if (!silent) pushNotice("info", `Payment #${id}: ${result.status}`, "Payment");
+      if (!silent) pushNotice("info", `Счёт #${id}: ${result.status}`, "Оплата");
       return statusValue;
     },
     [pushNotice, refresh]
@@ -814,10 +832,10 @@ function CabinetPage() {
       const opened = openPaymentUrl(result.pay_url);
       trackEvent("pay_link_opened", { invoice_id: result.invoice_id, source: "auto", opened });
       if (opened) {
-        pushNotice("success", `Payment link for invoice #${result.invoice_id} opened.`, "Payment");
+        pushNotice("success", `Ссылка на оплату счёта #${result.invoice_id} открыта.`, "Оплата");
         triggerNotify("success");
       } else {
-        pushNotice("warn", `Invoice #${result.invoice_id} created. Open payment link manually.`, "Payment");
+        pushNotice("warn", `Счёт #${result.invoice_id} создан. Откройте ссылку вручную.`, "Оплата");
       }
     });
   }
@@ -867,23 +885,23 @@ function CabinetPage() {
           return;
         }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Invoice check failed";
+        const msg = err instanceof Error ? err.message : "Не удалось проверить оплату";
         if (isAuthError(msg)) {
           setUnauthorized(true);
           setSnapshot(null);
-          setMiniAppAuthError("Refreshing session via Telegram Mini App...");
+          setMiniAppAuthError("Обновляю сессию через Telegram Mini App...");
           stopPolling();
           return;
         }
         if (pendingInvoiceChecksRef.current === 0) {
-          pushNotice("warn", "Payment status check is temporary unavailable. Retrying...");
+          pushNotice("warn", "Проверка статуса оплаты временно недоступна. Повторяю попытку...");
         }
       }
 
       pendingInvoiceChecksRef.current += 1;
       setPendingInvoiceChecks(pendingInvoiceChecksRef.current);
       if (pendingInvoiceChecksRef.current >= 40) {
-        pushNotice("warn", `Payment #${pendingInvoiceId} is still pending. You can check manually.`, "Payment");
+        pushNotice("warn", `Счёт #${pendingInvoiceId} всё ещё ожидает оплату. Можно проверить вручную.`, "Оплата");
         setPendingInvoiceId(0);
         stopPolling();
         return;
@@ -907,15 +925,15 @@ function CabinetPage() {
     try {
       trackEvent("plan_purchase_requested", { plan_id: planId });
       await apiJson("/api/public/cabinet/purchase-plan", { method: "POST", body: JSON.stringify({ plan_id: planId }) });
-      pushNotice("success", "Plan purchased.");
+      pushNotice("success", "Тариф оплачен.");
       triggerNotify("success");
       await refresh();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Plan purchase failed";
+      const msg = err instanceof Error ? err.message : "Не удалось купить тариф";
       if (isAuthError(msg)) {
         setUnauthorized(true);
         setSnapshot(null);
-        setMiniAppAuthError("Refreshing session via Telegram Mini App...");
+        setMiniAppAuthError("Обновляю сессию через Telegram Mini App...");
         return;
       }
       if (/insufficient balance/i.test(msg)) {
@@ -927,7 +945,7 @@ function CabinetPage() {
         setQuickAmount(suggested);
         setTopupAmount(suggested);
         navigate("balance");
-        pushNotice("warn", `Not enough balance. Top up ${fmtRub(suggested)} to continue.`, "Payment");
+        pushNotice("warn", `Недостаточно средств. Пополните ${fmtRub(suggested)} для продолжения.`, "Оплата");
         triggerNotify("warning");
       } else {
         pushNotice("error", msg);
@@ -942,7 +960,7 @@ function CabinetPage() {
     await withAction(async () => {
       await apiJson("/api/public/cabinet/giveaways/join", { method: "POST", body: JSON.stringify({ giveaway_id: giveawayId }) });
       trackEvent("giveaway_joined", { giveaway_id: giveawayId });
-      pushNotice("success", "You joined the giveaway.");
+      pushNotice("success", "Вы участвуете в розыгрыше.");
       triggerNotify("success");
     });
   }
@@ -965,21 +983,21 @@ function CabinetPage() {
       setFortuneLastPrizeId(winnerId);
       trackEvent("fortune_spin", { prize_id: winnerId, reward_rub: result?.result?.reward_rub || 0, reward_days: result?.result?.reward_days || 0 });
       if ((result?.result?.reward_rub || 0) > 0) {
-        pushNotice("success", `You won ${fmtRub(result.result.reward_rub)}.`, "Fortune");
+        pushNotice("success", `Вы выиграли ${fmtRub(result.result.reward_rub)}.`, "Фортуна");
       } else if ((result?.result?.reward_days || 0) > 0) {
-        pushNotice("success", `You won ${result.result.reward_days} subscription day(s).`, "Fortune");
+        pushNotice("success", `Вы выиграли ${result.result.reward_days} дн. подписки.`, "Фортуна");
       } else {
-        pushNotice("info", `Prize: ${result?.result?.prize_label || "Try next time"}.`, "Fortune");
+        pushNotice("info", `Приз: ${result?.result?.prize_label || "Повезёт в другой раз"}.`, "Фортуна");
       }
       triggerNotify("success");
       await refresh();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Spin failed";
+      const msg = err instanceof Error ? err.message : "Не удалось выполнить прокрут";
       if (isAuthError(msg)) {
         setUnauthorized(true);
         setSnapshot(null);
       } else {
-        pushNotice("error", msg, "Fortune");
+        pushNotice("error", msg, "Фортуна");
         triggerNotify("error");
       }
     } finally {
@@ -1001,10 +1019,10 @@ function CabinetPage() {
         mode: localOnly ? "local_only" : "remote",
       });
       if (localOnly) {
-        pushNotice("warn", "Device disabled locally. Remote server is unavailable now.", "Devices");
+        pushNotice("warn", "Устройство отключено локально. Удалённый сервер сейчас недоступен.", "Устройства");
         triggerNotify("warning");
       } else {
-        pushNotice("success", `Device access revoked (${result.revoked_count || 0}).`);
+        pushNotice("success", `Доступ устройства отозван (${result.revoked_count || 0}).`);
         triggerNotify("success");
       }
     });
@@ -1015,10 +1033,10 @@ function CabinetPage() {
     try {
       await navigator.clipboard.writeText(value);
       trackEvent("copy_text", { size: String(value || "").length });
-      pushNotice("success", "Copied.");
+      pushNotice("success", "Скопировано.");
       triggerNotify("success");
     } catch {
-      pushNotice("error", "Copy failed");
+      pushNotice("error", "Не удалось скопировать");
       triggerNotify("error");
     }
   }
@@ -1112,9 +1130,9 @@ function CabinetPage() {
         {showNotifications ? (
           <section className="panel notifications-panel">
             <div className="panel-head">
-              <h3>Notifications</h3>
+              <h3>Уведомления</h3>
               <button className="chip-btn" type="button" onClick={() => setNotifications([])}>
-                Clear
+                Очистить
               </button>
             </div>
             <div className="notifications-list">
@@ -1125,18 +1143,18 @@ function CabinetPage() {
                   <time>{new Date(item.created_at).toLocaleTimeString("ru-RU")}</time>
                 </article>
               ))}
-              {!notifications.length ? <div className="empty">No notifications.</div> : null}
+              {!notifications.length ? <div className="empty">Нет уведомлений.</div> : null}
             </div>
           </section>
         ) : null}
 
         {!pending && unauthorized ? (
           <section className="panel">
-            <h2>Telegram Mini App Required</h2>
-            <p>{miniAppAuthPending ? "Authorizing via Telegram Mini App..." : miniAppAuthError || "Open this page from Telegram bot Mini App."}</p>
+            <h2>Требуется Telegram Mini App</h2>
+            <p>{miniAppAuthPending ? "Идёт авторизация через Telegram Mini App..." : miniAppAuthError || "Откройте эту страницу из Mini App в Telegram-боте."}</p>
             <div className="action-row">
               <a className="ui-btn primary" href={config.bot_url} target="_blank" rel="noreferrer noopener">
-                Open bot and launch Mini App
+                Открыть бота и запустить Mini App
               </a>
             </div>
           </section>
@@ -1149,11 +1167,11 @@ function CabinetPage() {
             <section className="hero panel">
               <div className="hero-row">
                 <div>
-                  <h1>Welcome, {username}!</h1>
-                  <p>{snapshot.user.subscription_active ? `Active until ${fmtDate(snapshot.user.subscription_until)}` : "No active subscription"}</p>
+                  <h1>{username}, привет.</h1>
+                  <p>{snapshot.user.subscription_active ? `Активна до ${fmtDate(snapshot.user.subscription_until)}` : "Нет активной подписки"}</p>
                 </div>
                 <div className="hero-badges">
-                  <span className={`status-pill ${snapshot.user.subscription_active ? "ok" : "off"}`}>{snapshot.user.subscription_active ? "Active" : "Inactive"}</span>
+                  <span className={`status-pill ${snapshot.user.subscription_active ? "ok" : "off"}`}>{snapshot.user.subscription_active ? "Активна" : "Неактивна"}</span>
                   <span className="status-pill neutral">{fmtRub(snapshot.user.balance_rub)}</span>
                 </div>
               </div>
@@ -1162,62 +1180,62 @@ function CabinetPage() {
             {section === "dashboard" ? (
               <section className="stack">
                 <article className="panel trial-card">
-                  <h2>{snapshot.user.subscription_active ? "Subscription active" : "Free trial available"}</h2>
-                  <p>{snapshot.user.subscription_active ? "Your account is active and ready." : "Try VPN with fast setup in Telegram."}</p>
+                  <h2>{snapshot.user.subscription_active ? "Подписка активна" : "Доступен пробный период"}</h2>
+                  <p>{snapshot.user.subscription_active ? "Аккаунт активен и готов к работе." : "Попробуйте VPN с быстрой настройкой через Telegram."}</p>
                   <div className="numbers">
                     <div>
                       <strong>{daysLeft}</strong>
-                      <span>days</span>
+                      <span>дней</span>
                     </div>
                     <div>
                       <strong>{activeConfigs.length}</strong>
-                      <span>keys</span>
+                      <span>ключей</span>
                     </div>
                     <div>
                       <strong>{snapshot.user.invited_count}</strong>
-                      <span>referrals</span>
+                      <span>рефералов</span>
                     </div>
                   </div>
                   <div className="action-row">
                     <button className="ui-btn primary" type="button" onClick={() => void renewFromBalance()} disabled={actionPending}>
-                      Renew from balance
+                      Продлить с баланса
                     </button>
                     <button className="ui-btn ghost" type="button" onClick={() => void claimWelcome()} disabled={actionPending}>
-                      Claim welcome bonus
+                      Забрать бонус
                     </button>
                   </div>
                 </article>
 
                 <div className="double-grid">
                   <article className="panel mini-card">
-                    <h3>Balance</h3>
+                    <h3>Баланс</h3>
                     <strong>{fmtRub(snapshot.user.balance_rub)}</strong>
                     <button className="link-btn" type="button" onClick={() => navigate("balance")}>
-                      Open balance
+                      Открыть баланс
                     </button>
                   </article>
                   <article className="panel mini-card">
-                    <h3>Payments</h3>
+                    <h3>Оплаты</h3>
                     <strong>{paidPaymentsCount}</strong>
                     <button className="link-btn" type="button" onClick={() => navigate("subscription")}>
-                      Open subscription
+                      Открыть подписку
                     </button>
                   </article>
                 </div>
 
                 <article className="panel">
-                  <h3>Quick tools</h3>
+                  <h3>Быстрые действия</h3>
                   <div className="action-row">
                     {accessLink ? (
                       <button className="ui-btn ghost" type="button" onClick={() => void copyText(happAccessLink || accessLink)}>
-                        Copy access link
+                        Скопировать ссылку доступа
                       </button>
                     ) : null}
                     <button className="ui-btn ghost" type="button" onClick={() => navigate("help")}>
-                      Open help center
+                      Открыть помощь
                     </button>
                     <button className="ui-btn ghost" type="button" onClick={() => void refresh()} disabled={pending || actionPending}>
-                      Refresh data
+                      Обновить данные
                     </button>
                   </div>
                 </article>
@@ -1227,22 +1245,22 @@ function CabinetPage() {
             {section === "subscription" ? (
               <section className="stack">
                 <article className="panel">
-                  <h2>Subscription</h2>
-                  <p>{snapshot.user.subscription_active ? `Active until ${fmtDate(snapshot.user.subscription_until)}` : "You do not have an active subscription."}</p>
+                  <h2>Подписка</h2>
+                  <p>{snapshot.user.subscription_active ? `Активна до ${fmtDate(snapshot.user.subscription_until)}` : "У вас нет активной подписки."}</p>
                 </article>
 
                 <article className="panel plan-list">
-                  <h3>Choose plan</h3>
+                  <h3>Выберите тариф</h3>
                   {snapshot.plans.map((plan) => (
                     <div key={plan.id} className="plan-row">
                       <div>
                         <strong>{planLabel(plan)}</strong>
-                        <small>{plan.days} days</small>
+                        <small>{plan.days} дней</small>
                       </div>
                       <div className="plan-row-actions">
                         <span>{fmtRub(plan.price_rub)}</span>
                         <button className="ui-btn ghost" type="button" onClick={() => void buyPlan(plan.id)} disabled={actionPending}>
-                          Buy
+                          Купить
                         </button>
                       </div>
                     </div>
@@ -1251,18 +1269,18 @@ function CabinetPage() {
 
                 <article className="panel">
                   <div className="panel-head">
-                    <h3>Manage devices</h3>
-                    <small>{filteredConfigs.length} found</small>
+                    <h3>Устройства</h3>
+                    <small>Найдено: {filteredConfigs.length}</small>
                   </div>
                   <div className="device-filters">
                     <input
                       className="input"
                       value={deviceFilter}
-                      placeholder="Search by device or server"
+                      placeholder="Поиск по устройству или серверу"
                       onChange={(event) => setDeviceFilter(event.target.value)}
                     />
                     <select className="input" value={protocolFilter} onChange={(event) => setProtocolFilter(event.target.value)}>
-                      <option value="all">All protocols</option>
+                      <option value="all">Все протоколы</option>
                       {protocolOptions.map((item) => (
                         <option key={item} value={item}>
                           {item.toUpperCase()}
@@ -1278,19 +1296,19 @@ function CabinetPage() {
                           <small>
                             {cfg.server_name} · {cfg.protocol.toUpperCase()}
                           </small>
-                          <small>Created: {fmtDate(cfg.created_at)}</small>
+                          <small>Создан: {fmtDate(cfg.created_at)}</small>
                         </div>
                         <div className="action-row">
                           <button className="ui-btn ghost small" type="button" onClick={() => void copyText(happAccessLink || accessLink || cfg.vless_url)}>
-                            Copy access link
+                            Скопировать ссылку
                           </button>
                           <button className="ui-btn ghost small danger" type="button" onClick={() => setRevokeCandidate(cfg)} disabled={actionPending}>
-                            Remove
+                            Удалить
                           </button>
                         </div>
                       </article>
                     ))}
-                    {!filteredConfigs.length ? <div className="empty">No active devices match the filter.</div> : null}
+                    {!filteredConfigs.length ? <div className="empty">Нет активных устройств по текущему фильтру.</div> : null}
                   </div>
                 </article>
               </section>
@@ -1299,22 +1317,22 @@ function CabinetPage() {
             {section === "balance" ? (
               <section className="stack">
                 <article className="panel balance-panel">
-                  <h2>Current balance</h2>
+                  <h2>Текущий баланс</h2>
                   <div className="balance-value">{fmtRub(snapshot.user.balance_rub)}</div>
                 </article>
 
                 <article className="panel">
-                  <h3>Promo code</h3>
+                  <h3>Промокод</h3>
                   <form className="inline-form" onSubmit={(event) => void applyPromo(event)}>
-                    <input className="input" value={promoCode} placeholder="Enter promo code" onChange={(event) => setPromoCode(event.target.value)} />
+                    <input className="input" value={promoCode} placeholder="Введите промокод" onChange={(event) => setPromoCode(event.target.value)} />
                     <button className="ui-btn primary" type="submit" disabled={actionPending}>
-                      Activate
+                      Активировать
                     </button>
                   </form>
                 </article>
 
                 <article className="panel">
-                  <h3>Top up balance</h3>
+                  <h3>Пополнение баланса</h3>
                   <div className="quick-amounts">
                     {quickTopupValues.map((amount) => (
                       <button
@@ -1333,7 +1351,7 @@ function CabinetPage() {
                   </div>
                   <form className="topup-form" onSubmit={(event) => void createInvoice(event)}>
                     <label>
-                      Amount (RUB)
+                      Сумма (RUB)
                       <input
                         className="input"
                         type="number"
@@ -1344,7 +1362,7 @@ function CabinetPage() {
                       />
                     </label>
                     <label>
-                      Payment method
+                      Способ оплаты
                       <select className="input" value={topupGateway} onChange={(event) => setTopupGateway(event.target.value)}>
                         {GATEWAYS.map((g) => (
                           <option key={g.code} value={g.code}>
@@ -1354,15 +1372,15 @@ function CabinetPage() {
                       </select>
                     </label>
                     <button className="ui-btn primary" type="submit" disabled={actionPending}>
-                      Top up
+                      Пополнить
                     </button>
                   </form>
 
                   {createdInvoice ? (
                     <div className="invoice-box">
-                      <p>Invoice #{createdInvoice.invoice_id}</p>
+                      <p>Счёт #{createdInvoice.invoice_id}</p>
                       {pendingInvoiceId === createdInvoice.invoice_id ? (
-                        <p className="muted-text">Waiting for payment confirmation... check #{pendingInvoiceChecks}/40</p>
+                        <p className="muted-text">Ожидание подтверждения оплаты... попытка #{pendingInvoiceChecks}/40</p>
                       ) : null}
                       <div className="action-row">
                         <button
@@ -1373,14 +1391,14 @@ function CabinetPage() {
                             const opened = openPaymentUrl(createdInvoice.pay_url);
                             trackEvent("pay_link_opened", { invoice_id: createdInvoice.invoice_id, source: "manual", opened });
                             if (!opened) {
-                              pushNotice("warn", "Unable to open payment link automatically.");
+                              pushNotice("warn", "Не удалось автоматически открыть ссылку оплаты.");
                             }
                           }}
                         >
-                          Open payment link
+                          Открыть оплату
                         </button>
                         <button className="ui-btn ghost" type="button" onClick={() => void checkInvoice(createdInvoice.invoice_id)} disabled={actionPending}>
-                          Check status
+                          Проверить статус
                         </button>
                       </div>
                     </div>
@@ -1392,37 +1410,37 @@ function CabinetPage() {
             {section === "referrals" ? (
               <section className="stack">
                 <article className="panel">
-                  <h2>Referral program</h2>
+                  <h2>??????????? ?????????</h2>
                   <div className="double-grid">
                     <div className="stat-box">
-                      <span>Total referrals</span>
+                      <span>Всего рефералов</span>
                       <strong>{snapshot.user.invited_count}</strong>
                     </div>
                     <div className="stat-box">
-                      <span>Total earnings</span>
+                      <span>Всего заработано</span>
                       <strong>{fmtRub(snapshot.user.referral_bonus_rub)}</strong>
                     </div>
                   </div>
                 </article>
 
                 <article className="panel">
-                  <h3>Your referral links</h3>
+                  <h3>???? ??????????? ??????</h3>
                   <div className="ref-link-row">
                     <input className="input" value={botRefLink} readOnly />
                     <button className="ui-btn primary" type="button" onClick={() => void copyText(botRefLink)}>
-                      Copy
+                      Копировать
                     </button>
                   </div>
                   <div className="ref-link-row">
                     <input className="input" value={cabinetRefLink} readOnly />
                     <button className="ui-btn ghost" type="button" onClick={() => void copyText(cabinetRefLink)}>
-                      Copy
+                      Копировать
                     </button>
                   </div>
                 </article>
 
                 <article className="panel">
-                  <h3>Recent payments</h3>
+                  <h3>Последние оплаты</h3>
                   <div className="payments-list">
                     {snapshot.payments.slice(0, 8).map((p) => (
                       <div key={p.invoice_id} className="payment-item">
@@ -1431,7 +1449,7 @@ function CabinetPage() {
                         <span>{p.status}</span>
                       </div>
                     ))}
-                    {!snapshot.payments.length ? <div className="empty">No payments yet.</div> : null}
+                    {!snapshot.payments.length ? <div className="empty">Оплат пока нет.</div> : null}
                   </div>
                 </article>
               </section>
@@ -1440,10 +1458,10 @@ function CabinetPage() {
             {section === "giveaways" ? (
               <section className="stack">
                 <article className="panel">
-                  <h2>Fortune Wheel</h2>
+                  <h2>Колесо фортуны</h2>
                   <p>
-                    Spin cost: {fmtRub(fortune?.price_rub || 29)}.
-                    {fortune?.free_spin_available ? " Free spin is available now." : ` Next free spin: ${fortune?.next_free_spin_at || "-"}.`}
+                    Стоимость прокрута: {fmtRub(fortune?.price_rub || 29)}.
+                    {fortune?.free_spin_available ? " Бесплатный прокрут доступен сейчас." : ` До бесплатного прокрута: ${fmtCountdown(fortune?.next_free_spin_at || "", nowMs)}.`}
                   </p>
                 </article>
                 <article className="panel fortune-panel">
@@ -1474,28 +1492,28 @@ function CabinetPage() {
                     <div className="fortune-center">SPIN</div>
                   </div>
                   <div className="fortune-meta">
-                    <div className="status-pill neutral">Balance: {fmtRub(snapshot.user.balance_rub)}</div>
+                    <div className="status-pill neutral">Баланс: {fmtRub(snapshot.user.balance_rub)}</div>
                     <div className={`status-pill ${snapshot.user.subscription_active ? "ok" : "off"}`}>
-                      {snapshot.user.subscription_active ? "Subscription active" : "Subscription inactive"}
+                      {snapshot.user.subscription_active ? "Подписка активна" : "Подписка неактивна"}
                     </div>
                   </div>
                   {fortune?.reason ? <p className="muted-text">{fortune.reason}</p> : null}
                   <div className="action-row">
                     <button className="ui-btn primary" type="button" onClick={() => void spinFortuneWheel()} disabled={actionPending || !fortune?.can_spin}>
-                      {fortune?.free_spin_available ? "Spin for free" : `Spin for ${fmtRub(fortune?.price_rub || 29)}`}
+                      {fortune?.free_spin_available ? "Крутить бесплатно" : `Крутить за ${fmtRub(fortune?.price_rub || 29)}`}
                     </button>
                     <button className="ui-btn ghost" type="button" onClick={() => navigate("balance")}>
-                      Top up balance
+                      Пополнить баланс
                     </button>
                   </div>
                   {fortuneActivePrize ? (
                     <p className="muted-text">
-                      Last prize: <strong>{fortuneActivePrize.label}</strong>
+                      Последний приз: <strong>{fortuneActivePrize.label}</strong>
                     </p>
                   ) : null}
                 </article>
                 <article className="panel">
-                  <h3>Prize pool</h3>
+                  <h3>Призы</h3>
                   <div className="fortune-prize-list">
                     {fortunePrizes.map((item) => (
                       <div key={item.id} className="fortune-prize-row">
@@ -1503,24 +1521,24 @@ function CabinetPage() {
                         <span>{item.emoji || "🎁"} {item.label}</span>
                       </div>
                     ))}
-                    {!fortunePrizes.length ? <div className="empty">No prize configuration.</div> : null}
+                    {!fortunePrizes.length ? <div className="empty">Призы не настроены.</div> : null}
                   </div>
                 </article>
                 <article className="panel">
-                  <h3>Recent spins</h3>
+                  <h3>Последние прокруты</h3>
                   <div className="payments-list">
                     {fortuneRecent.slice(0, 8).map((item) => (
                       <div key={item.id} className="payment-item">
                         <span>{item.prize_label}</span>
-                        <span>{item.reward_rub > 0 ? `+${fmtRub(item.reward_rub)}` : item.reward_days > 0 ? `+${item.reward_days} day(s)` : "No reward"}</span>
+                        <span>{item.reward_rub > 0 ? `+${fmtRub(item.reward_rub)}` : item.reward_days > 0 ? `+${item.reward_days} дн.` : "Без выигрыша"}</span>
                         <span>{item.created_at}</span>
                       </div>
                     ))}
-                    {!fortuneRecent.length ? <div className="empty">No spins yet.</div> : null}
+                    {!fortuneRecent.length ? <div className="empty">Прокрутов пока нет.</div> : null}
                   </div>
                 </article>
                 <article className="panel plan-list">
-                  <h3>Active giveaways</h3>
+                  <h3>Активные розыгрыши</h3>
                   {snapshot.giveaways.map((item) => (
                     <div key={item.id} className="plan-row">
                       <div>
@@ -1528,11 +1546,11 @@ function CabinetPage() {
                         <small>{item.prize || item.kind}</small>
                       </div>
                       <button className="ui-btn ghost" type="button" onClick={() => void joinGiveaway(item.id)} disabled={actionPending || item.joined}>
-                        {item.joined ? "Joined" : "Join"}
+                        {item.joined ? "Участвуете" : "Участвовать"}
                       </button>
                     </div>
                   ))}
-                  {!snapshot.giveaways.length ? <div className="empty">No active giveaways.</div> : null}
+                  {!snapshot.giveaways.length ? <div className="empty">Активных розыгрышей нет.</div> : null}
                 </article>
               </section>
             ) : null}
@@ -1540,28 +1558,28 @@ function CabinetPage() {
             {section === "help" ? (
               <section className="stack">
                 <article className="panel">
-                  <h2>Help center</h2>
-                  <p>Support, documentation and useful links.</p>
+                  <h2>Центр помощи</h2>
+                  <p>Поддержка, инструкции и полезные ссылки.</p>
                   <div className="action-row">
                     <a className="ui-btn primary" href={config.support_url || "https://t.me/trumpvpnhelp"} target="_blank" rel="noreferrer noopener">
-                      Open support chat
+                      Открыть поддержку
                     </a>
                     <a className="ui-btn ghost" href={config.bot_url} target="_blank" rel="noreferrer noopener">
-                      Open Telegram bot
+                      Открыть Telegram-бота
                     </a>
                   </div>
                 </article>
                 <article className="panel">
-                  <h3>Quick actions</h3>
+                  <h3>Быстрые действия</h3>
                   <div className="action-row">
                     <button className="ui-btn ghost" type="button" onClick={() => void copyText(config.support_url || "https://t.me/trumpvpnhelp")}>
-                      Copy support link
+                      Скопировать ссылку поддержки
                     </button>
                     <button className="ui-btn ghost" type="button" onClick={() => void copyText(String(snapshot.user.telegram_id || ""))}>
-                      Copy Telegram ID
+                      Скопировать Telegram ID
                     </button>
                     <button className="ui-btn ghost" type="button" onClick={() => void refresh()} disabled={pending || actionPending}>
-                      Refresh data
+                      Обновить данные
                     </button>
                   </div>
                 </article>
@@ -1591,13 +1609,13 @@ function CabinetPage() {
       {revokeCandidate ? (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="modal-card panel">
-            <h3>Remove device access?</h3>
+            <h3>Удалить доступ устройства?</h3>
             <p>
-              Device <strong>{revokeCandidate.device_name}</strong> will be revoked on <strong>{revokeTargetsCount}</strong> server(s).
+              Устройство <strong>{revokeCandidate.device_name}</strong> будет отключено на <strong>{revokeTargetsCount}</strong> сервер(ах).
             </p>
             <div className="action-row">
               <button className="ui-btn ghost" type="button" onClick={() => setRevokeCandidate(null)} disabled={actionPending}>
-                Cancel
+                Отмена
               </button>
               <button
                 className="ui-btn ghost danger"
@@ -1610,7 +1628,7 @@ function CabinetPage() {
                 }}
                 disabled={actionPending}
               >
-                Remove
+                Удалить
               </button>
             </div>
           </div>
@@ -1634,7 +1652,7 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
         return (await res.json()) as SubscriptionPreview;
       })
       .then((payload) => setData(payload))
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed to load subscription"))
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Не удалось загрузить подписку"))
       .finally(() => setPending(false));
   }, [search, telegramId, token]);
 
@@ -1655,8 +1673,8 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
     <main className="cabinet-root">
       <div className="mobile-shell sub-shell">
         <section className="panel">
-          <h1>Subscription</h1>
-          <p>Copy URL and import into VPN client.</p>
+          <h1>Подписка</h1>
+          <p>Скопируйте URL и импортируйте его в VPN-клиент.</p>
         </section>
         {pending ? <SkeletonCabinet /> : null}
         {error ? <section className="toast err">{error}</section> : null}
@@ -1664,15 +1682,15 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
           <>
             <section className="panel stats-row">
               <div>
-                <span>Status</span>
-                <strong>{data.metrics.subscription_active ? "Active" : "Inactive"}</strong>
+                <span>Статус</span>
+                <strong>{data.metrics.subscription_active ? "Активна" : "Неактивна"}</strong>
               </div>
               <div>
-                <span>Days left</span>
+                <span>Осталось дней</span>
                 <strong>{data.metrics.days_left}</strong>
               </div>
               <div>
-                <span>Servers</span>
+                <span>Серверов</span>
                 <strong>{data.metrics.servers_count}</strong>
               </div>
             </section>
@@ -1680,25 +1698,25 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
             <section className="panel">
               <div className="action-row">
                 <button className="ui-btn primary" type="button" onClick={() => void copyUrl(data.links.subscription_url)}>
-                  {copied ? "Copied" : "Copy URL"}
+                  {copied ? "Скопировано" : "Скопировать URL"}
                 </button>
                 <a className="ui-btn ghost" href={data.links.stats_url}>
-                  Refresh
+                  Обновить
                 </a>
                 <a className="ui-btn ghost" href={data.links.raw_url}>
-                  Raw
+                  ????????
                 </a>
                 <a className="ui-btn ghost" href={data.links.b64_url}>
                   Base64
                 </a>
                 {data.links.happ_import_url ? (
                   <a className="ui-btn ghost" href={data.links.happ_import_url}>
-                    Open in HApp
+                    Открыть в HApp
                   </a>
                 ) : null}
                 {data.links.happ_download_url ? (
                   <a className="ui-btn ghost" href={data.links.happ_download_url} target="_blank" rel="noreferrer noopener">
-                    Download HApp
+                    Скачать HApp
                   </a>
                 ) : null}
               </div>
