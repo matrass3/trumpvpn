@@ -87,12 +87,12 @@ type AppNotice = {
 };
 
 const NAV: Array<{ key: CabinetSection; title: string; icon: string }> = [
-  { key: "dashboard", title: "ÐÐ»Ð°Ð²Ð½Ð°Ñ", icon: "ð " },
-  { key: "subscription", title: "ÐÐ¾Ð´Ð¿Ð¸ÑÐºÐ°", icon: "â¨" },
-  { key: "balance", title: "ÐÐ°Ð»Ð°Ð½Ñ", icon: "ð³" },
-  { key: "referrals", title: "Ð ÐµÑÐµÑÐ°Ð»Ñ", icon: "ð¥" },
-  { key: "giveaways", title: "Ð¤Ð¾ÑÑÑÐ½Ð°", icon: "ð" },
-  { key: "help", title: "ÐÐ¾Ð¼Ð¾ÑÑ", icon: "â" },
+  { key: "dashboard", title: "Главная", icon: "🏠" },
+  { key: "subscription", title: "Подписка", icon: "✨" },
+  { key: "balance", title: "Баланс", icon: "💳" },
+  { key: "referrals", title: "Рефералы", icon: "👥" },
+  { key: "giveaways", title: "Фортуна", icon: "🎁" },
+  { key: "help", title: "Помощь", icon: "❓" },
 ];
 
 const GATEWAYS = [
@@ -227,11 +227,11 @@ function planLabel(plan: { label: string; months: number; days: number }) {
   const label = String(plan.label || "").trim();
   if (label && !label.includes("�") && !/\?{3,}/.test(label)) return label;
   const m = plan.months > 0 ? plan.months : Math.max(1, Math.round(plan.days / 30));
-  if (m === 1) return "1 Ð¼ÐµÑÑÑ";
-  if (m === 3) return "3 Ð¼ÐµÑÑÑÐ°";
-  if (m === 6) return "6 Ð¼ÐµÑÑÑÐµÐ²";
-  if (m === 12) return "1 Ð³Ð¾Ð´";
-  return `${m} Ð¼ÐµÑ.`;
+  if (m === 1) return "1 месяц";
+  if (m === 3) return "3 месяца";
+  if (m === 6) return "6 месяцев";
+  if (m === 12) return "1 год";
+  return `${m} мес.`;
 }
 
 function triggerImpact(style: "light" | "medium" | "heavy" = "light") {
@@ -1411,7 +1411,7 @@ function CabinetPage() {
             {section === "referrals" ? (
               <section className="stack">
                 <article className="panel">
-                  <h2>??????????? ?????????</h2>
+                  <h2>Реферальная программа</h2>
                   <div className="double-grid">
                     <div className="stat-box">
                       <span>Всего рефералов</span>
@@ -1425,7 +1425,7 @@ function CabinetPage() {
                 </article>
 
                 <article className="panel">
-                  <h3>???? ??????????? ??????</h3>
+                  <h3>Ваши реферальные ссылки</h3>
                   <div className="ref-link-row">
                     <input className="input" value={botRefLink} readOnly />
                     <button className="ui-btn primary" type="button" onClick={() => void copyText(botRefLink)}>
@@ -1705,7 +1705,7 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
                   Обновить
                 </a>
                 <a className="ui-btn ghost" href={data.links.raw_url}>
-                  ????????
+                  Оригинал
                 </a>
                 <a className="ui-btn ghost" href={data.links.b64_url}>
                   Base64
