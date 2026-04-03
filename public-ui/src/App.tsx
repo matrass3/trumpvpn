@@ -35,6 +35,8 @@ type CabinetSnapshot = {
     price_rub: number;
     can_spin: boolean;
     reason: string;
+    free_spin_available: boolean;
+    next_free_spin_at: string;
     balance_rub: number;
     subscription_active: boolean;
     prizes: Array<{ id: string; label: string; kind: string; value_int: number; weight: number; color: string; emoji: string }>;
@@ -1439,7 +1441,10 @@ function CabinetPage() {
               <section className="stack">
                 <article className="panel">
                   <h2>Fortune Wheel</h2>
-                  <p>Spin cost: {fmtRub(fortune?.price_rub || 19)}. Prize is credited instantly.</p>
+                  <p>
+                    Spin cost: {fmtRub(fortune?.price_rub || 29)}.
+                    {fortune?.free_spin_available ? " Free spin is available now." : ` Next free spin: ${fortune?.next_free_spin_at || "-"}.`}
+                  </p>
                 </article>
                 <article className="panel fortune-panel">
                   <div className="fortune-wheel-wrap">
@@ -1477,7 +1482,7 @@ function CabinetPage() {
                   {fortune?.reason ? <p className="muted-text">{fortune.reason}</p> : null}
                   <div className="action-row">
                     <button className="ui-btn primary" type="button" onClick={() => void spinFortuneWheel()} disabled={actionPending || !fortune?.can_spin}>
-                      Spin for {fmtRub(fortune?.price_rub || 19)}
+                      {fortune?.free_spin_available ? "Spin for free" : `Spin for ${fmtRub(fortune?.price_rub || 29)}`}
                     </button>
                     <button className="ui-btn ghost" type="button" onClick={() => navigate("balance")}>
                       Top up balance

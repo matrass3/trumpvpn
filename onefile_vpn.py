@@ -1117,14 +1117,14 @@ GIVEAWAY_KINDS = {
 GIVEAWAY_MAX_ACTIVE = 3
 GIVEAWAY_MIN_DEPOSIT_RUB = 50
 
-FORTUNE_SPIN_PRICE_RUB = 19
+FORTUNE_SPIN_PRICE_RUB = 29
 FORTUNE_PRIZES: list[dict[str, Any]] = [
-    {"id": "rub_100", "label": "100 RUB", "kind": "balance_rub", "value_int": 100, "weight": 1, "color": "#facc15", "emoji": "💰"},
-    {"id": "days_7", "label": "7 days subscription", "kind": "subscription_days", "value_int": 7, "weight": 2, "color": "#ef4444", "emoji": "📅"},
-    {"id": "days_1", "label": "1 day subscription", "kind": "subscription_days", "value_int": 1, "weight": 6, "color": "#3b82f6", "emoji": "🗓️"},
-    {"id": "rub_5", "label": "5 RUB", "kind": "balance_rub", "value_int": 5, "weight": 10, "color": "#a855f7", "emoji": "💸"},
-    {"id": "rub_1", "label": "1 RUB", "kind": "balance_rub", "value_int": 1, "weight": 12, "color": "#60a5fa", "emoji": "🪙"},
-    {"id": "try_next", "label": "Try next time", "kind": "nothing", "value_int": 0, "weight": 14, "color": "#64748b", "emoji": "🍀"},
+    {"id": "rub_300", "label": "300 RUB", "kind": "balance_rub", "value_int": 300, "weight": 1, "color": "#facc15", "emoji": "💰"},
+    {"id": "days_14", "label": "14 days subscription", "kind": "subscription_days", "value_int": 14, "weight": 2, "color": "#ef4444", "emoji": "📅"},
+    {"id": "days_3", "label": "3 days subscription", "kind": "subscription_days", "value_int": 3, "weight": 6, "color": "#3b82f6", "emoji": "🗓️"},
+    {"id": "rub_25", "label": "25 RUB", "kind": "balance_rub", "value_int": 25, "weight": 10, "color": "#a855f7", "emoji": "💸"},
+    {"id": "rub_5", "label": "5 RUB", "kind": "balance_rub", "value_int": 5, "weight": 12, "color": "#60a5fa", "emoji": "🪙"},
+    {"id": "reroll", "label": "Reroll", "kind": "reroll", "value_int": 0, "weight": 14, "color": "#64748b", "emoji": "🍀"},
     {"id": "nothing", "label": "Nothing", "kind": "nothing", "value_int": 0, "weight": 16, "color": "#6b4b5e", "emoji": "🙃"},
 ]
 
@@ -1173,20 +1173,42 @@ def _fortune_recent_spins(db: Session, user_id: int, limit: int = 15) -> list[di
     return [_fortune_spin_to_dict(item) for item in rows]
 
 
+def _fortune_last_free_spin_at(db: Session, user_id: int) -> datetime | None:
+    return db.scalar(
+        select(FortuneSpin.created_at)
+        .where(FortuneSpin.user_id == int(user_id), FortuneSpin.price_rub == 0)
+        .order_by(FortuneSpin.created_at.desc(), FortuneSpin.id.desc())
+        .limit(1)
+    )
+
+
+def _fortune_daily_free_available(db: Session, user_id: int, now: datetime | None = None) -> tuple[bool, datetime | None]:
+    now = now or utc_now()
+    last_free = _fortune_last_free_spin_at(db, user_id)
+    if not last_free:
+        return True, None
+    next_at = last_free + timedelta(days=1)
+    return bool(next_at <= now), next_at
+
+
 def _fortune_state_for_user(db: Session, user: User, include_recent_limit: int = 15) -> dict[str, Any]:
+    now = utc_now()
     balance = int(user.balance_rub or 0)
     active_sub = is_subscription_active(user)
-    can_spin = active_sub and balance >= int(FORTUNE_SPIN_PRICE_RUB)
+    free_available, next_free_at = _fortune_daily_free_available(db, int(user.id), now=now)
+    can_spin = active_sub and (free_available or balance >= int(FORTUNE_SPIN_PRICE_RUB))
     reason = ""
     if not active_sub:
         reason = "Active subscription required"
-    elif balance < int(FORTUNE_SPIN_PRICE_RUB):
+    elif (not free_available) and balance < int(FORTUNE_SPIN_PRICE_RUB):
         reason = f"Need {FORTUNE_SPIN_PRICE_RUB} RUB to spin"
 
     return {
         "price_rub": int(FORTUNE_SPIN_PRICE_RUB),
         "can_spin": bool(can_spin),
         "reason": reason,
+        "free_spin_available": bool(free_available),
+        "next_free_spin_at": _fmt_dt(next_free_at),
         "balance_rub": balance,
         "subscription_active": bool(active_sub),
         "prizes": [_fortune_prize_public_item(item) for item in FORTUNE_PRIZES],
@@ -1196,14 +1218,16 @@ def _fortune_state_for_user(db: Session, user: User, include_recent_limit: int =
 
 def _apply_fortune_spin(db: Session, user: User) -> dict[str, Any]:
     balance_before = int(user.balance_rub or 0)
-    price = int(FORTUNE_SPIN_PRICE_RUB)
+    free_available, _ = _fortune_daily_free_available(db, int(user.id))
+    price = 0 if free_available else int(FORTUNE_SPIN_PRICE_RUB)
     if not is_subscription_active(user):
         raise HTTPException(status_code=400, detail="Active subscription required for Fortune Wheel")
-    if balance_before < price:
+    if price > 0 and balance_before < price:
         missing = price - balance_before
         raise HTTPException(status_code=400, detail=f"Insufficient balance. Need {price} RUB, missing {missing} RUB")
 
-    user.balance_rub = balance_before - price
+    if price > 0:
+        user.balance_rub = balance_before - price
     prize = _fortune_pick_prize()
     prize_kind = str(prize.get("kind") or "nothing")
     prize_value_int = int(prize.get("value_int") or 0)
@@ -1215,6 +1239,10 @@ def _apply_fortune_spin(db: Session, user: User) -> dict[str, Any]:
     elif prize_kind == "subscription_days" and prize_value_int > 0:
         reward_days = prize_value_int
         _apply_subscription_days_no_commit(user, reward_days)
+    elif prize_kind == "reroll" and price > 0:
+        # "Reroll" compensates current paid spin cost.
+        reward_rub = int(price)
+        user.balance_rub = int(user.balance_rub or 0) + reward_rub
 
     balance_after = int(user.balance_rub or 0)
     spin = FortuneSpin(
