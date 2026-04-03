@@ -11088,10 +11088,7 @@ def giveaways_kb(giveaways: list[dict[str, Any]]) -> InlineKeyboardMarkup:
 
 
 def subscription_link_kb(telegram_id: int) -> InlineKeyboardMarkup:
-    happ_sub_url = build_user_subscription_url_for_device(
-        telegram_id,
-        device_name="happ",
-    )
+    happ_sub_url = build_user_subscription_url(telegram_id)
     happ_sub_url = f"{happ_sub_url}{'&' if '?' in happ_sub_url else '?'}fmt=b64&preview=0"
     sub_url = build_user_subscription_url(telegram_id)
     encoded_happ_sub_url = quote(happ_sub_url, safe="")

@@ -960,6 +960,17 @@ function CabinetPage() {
   const username = snapshot?.user.username || `id${snapshot?.user.telegram_id || ""}`;
   const daysLeft = getDaysLeft(snapshot?.user.subscription_until);
   const accessLink = String(snapshot?.user.subscription_url || "").trim();
+  const happAccessLink = useMemo(() => {
+    if (!accessLink) return "";
+    try {
+      const parsed = new URL(accessLink);
+      parsed.searchParams.set("fmt", "b64");
+      parsed.searchParams.set("preview", "0");
+      return parsed.toString();
+    } catch {
+      return accessLink;
+    }
+  }, [accessLink]);
   const botRefLink = `${config.bot_url}?start=ref${snapshot?.user.telegram_id || ""}`;
   const cabinetRefLink = `${window.location.origin}/cabinet?ref=${snapshot?.user.telegram_id || ""}`;
   const activeConfigs = (snapshot?.user.configs || []).filter((cfg) => cfg.is_active);
@@ -1112,7 +1123,7 @@ function CabinetPage() {
                   <h3>Quick tools</h3>
                   <div className="action-row">
                     {accessLink ? (
-                      <button className="ui-btn ghost" type="button" onClick={() => void copyText(accessLink)}>
+                      <button className="ui-btn ghost" type="button" onClick={() => void copyText(happAccessLink || accessLink)}>
                         Copy access link
                       </button>
                     ) : null}
@@ -1184,7 +1195,7 @@ function CabinetPage() {
                           <small>Created: {fmtDate(cfg.created_at)}</small>
                         </div>
                         <div className="action-row">
-                          <button className="ui-btn ghost small" type="button" onClick={() => void copyText(accessLink || cfg.vless_url)}>
+                          <button className="ui-btn ghost small" type="button" onClick={() => void copyText(happAccessLink || accessLink || cfg.vless_url)}>
                             Copy access link
                           </button>
                           <button className="ui-btn ghost small danger" type="button" onClick={() => setRevokeCandidate(cfg)} disabled={actionPending}>
