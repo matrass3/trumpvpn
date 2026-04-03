@@ -974,11 +974,12 @@ function CabinetPage() {
         ok: boolean;
         result: { prize_id: string; prize_label: string; reward_rub: number; reward_days: number };
       }>("/api/public/cabinet/fortune/spin", { method: "POST" });
-      const prizes = snapshot.fortune?.prizes || [];
+      const prizes = fortunePrizes.length ? fortunePrizes : snapshot.fortune?.prizes || [];
       const winnerId = String(result?.result?.prize_id || "");
       const winnerIndex = Math.max(0, prizes.findIndex((item) => String(item.id || "") === winnerId));
       const segAngle = prizes.length > 0 ? 360 / prizes.length : 360;
-      const stopOffset = ((360 - (winnerIndex + 0.5) * segAngle) % 360 + 360) % 360;
+      const centerAngle = -90 + segAngle / 2 + winnerIndex * segAngle;
+      const stopOffset = ((-centerAngle % 360) + 360) % 360;
       setFortuneWheelDeg((prev) => prev + 5 * 360 + stopOffset);
       setFortuneLastPrizeId(winnerId);
       trackEvent("fortune_spin", { prize_id: winnerId, reward_rub: result?.result?.reward_rub || 0, reward_days: result?.result?.reward_days || 0 });
