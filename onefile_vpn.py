@@ -3096,6 +3096,22 @@ def _prepare_user_subscription_data(
             else:
                 active_configs = _active_subscription_configs(user, max_configs)
 
+    # HApp should import full server pool for the account, not just one device slice.
+    # Pick one latest active config per server to avoid duplicate entries for the same node.
+    if client_app_name == "happ":
+        by_server: dict[int, ClientConfig] = {}
+        for cfg in list(user.configs or []):
+            if not (cfg.is_active and cfg.server and bool(cfg.server.enabled)):
+                continue
+            sid = int(getattr(cfg, "server_id", 0) or 0)
+            if sid <= 0:
+                continue
+            current = by_server.get(sid)
+            if not current or cfg.created_at > current.created_at:
+                by_server[sid] = cfg
+        if by_server:
+            active_configs = sorted(by_server.values(), key=lambda cfg: cfg.created_at, reverse=True)
+
     if not active_configs:
         raise HTTPException(status_code=404, detail="No active devices. Add device in bot first")
     links = [str(cfg.vless_url or "").strip() for cfg in active_configs if str(cfg.vless_url or "").strip()]
