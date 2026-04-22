@@ -972,16 +972,21 @@ function CabinetPage() {
     triggerImpact("heavy");
     setActionPending(true);
     try {
+      const currentPrizes = fortunePrizes.length ? [...fortunePrizes] : snapshot.fortune?.prizes || [];
       const result = await apiJson<{
         ok: boolean;
         result: { prize_id: string; prize_label: string; reward_rub: number; reward_days: number };
       }>("/api/public/cabinet/fortune/spin", { method: "POST" });
-      const prizes = fortunePrizes.length ? fortunePrizes : snapshot.fortune?.prizes || [];
+      const prizes = currentPrizes.length ? currentPrizes : snapshot.fortune?.prizes || [];
       const winnerId = String(result?.result?.prize_id || "");
       const winnerIndex = Math.max(0, prizes.findIndex((item) => String(item.id || "") === winnerId));
       const segAngle = prizes.length > 0 ? 360 / prizes.length : 360;
       const stopOffset = ((-(winnerIndex * segAngle + segAngle / 2) % 360) + 360) % 360;
-      setFortuneWheelDeg((prev) => prev + 5 * 360 + stopOffset);
+      setFortuneWheelDeg((prev) => {
+        const current = ((prev % 360) + 360) % 360;
+        const delta = ((stopOffset - current) + 360) % 360;
+        return prev + 5 * 360 + delta;
+      });
       setFortuneLastPrizeId(winnerId);
       trackEvent("fortune_spin", { prize_id: winnerId, reward_rub: result?.result?.reward_rub || 0, reward_days: result?.result?.reward_days || 0 });
       if ((result?.result?.reward_rub || 0) > 0) {
@@ -1108,8 +1113,8 @@ function CabinetPage() {
       if (!node) return;
       const size = node.getBoundingClientRect().width || 0;
       if (size <= 0) return;
-      setFortuneEmojiRadius(Math.max(90, size * 0.33));
-      setFortuneMarkRadius(Math.max(110, size * 0.5 - 8));
+      setFortuneEmojiRadius(Math.max(80, size / 2 - 58));
+      setFortuneMarkRadius(Math.max(110, size / 2 - 8));
     };
     update();
     window.addEventListener("resize", update);
@@ -1667,6 +1672,10 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const search = useMemo(() => window.location.search || "", []);
+  const preferredImportUrl = useMemo(() => {
+    if (!data) return "";
+    return String(data.links.happ_import_url || data.links.subscription_url || "").trim();
+  }, [data]);
 
   useEffect(() => {
     void fetch(`/api/public/subscription/${telegramId}/${token}${search}`, { headers: { Accept: "application/json" }, credentials: "include" })
@@ -1720,7 +1729,7 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
 
             <section className="panel">
               <div className="action-row">
-                <button className="ui-btn primary" type="button" onClick={() => void copyUrl(data.links.subscription_url)}>
+                <button className="ui-btn primary" type="button" onClick={() => void copyUrl(preferredImportUrl || data.links.subscription_url)}>
                   {copied ? "Скопировано" : "Скопировать URL"}
                 </button>
                 <a className="ui-btn ghost" href={data.links.stats_url}>
@@ -1743,7 +1752,7 @@ function SubscriptionPage({ telegramId, token }: { telegramId: string; token: st
                   </a>
                 ) : null}
               </div>
-              <pre className="url-box">{data.links.subscription_url}</pre>
+              <pre className="url-box">{preferredImportUrl || data.links.subscription_url}</pre>
             </section>
           </>
         ) : null}

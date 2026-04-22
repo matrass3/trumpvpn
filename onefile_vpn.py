@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import asyncio
 import base64
 import hashlib
@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     welcome_bonus_days: int = 3
     welcome_channel_url: str = "https://t.me/trumpxvpn"
     welcome_channel_chat: str = "@trumpxvpn"
+    telegram_proxy_host: str = ""
+    telegram_proxy_port: int = 443
+    telegram_proxy_secret: str = ""
+    telegram_proxy_link: str = ""
     public_bot_url: str = "https://t.me/trumpvlessbot"
     public_help_url: str = "https://t.me/trumpvpnhelp"
     public_user_session_hours: int = 720
@@ -2227,6 +2231,10 @@ def add_hysteria2_client(
 def server_service_name(server: VpnServer) -> str:
     if server_protocol(server) == SERVER_PROTOCOL_HYSTERIA2:
         return "hysteria-server"
+    add_script = str(getattr(server, "remote_add_script", "") or "").lower()
+    remove_script = str(getattr(server, "remote_remove_script", "") or "").lower()
+    if "3xui" in add_script or "3xui" in remove_script:
+        return "x-ui"
     return "xray"
 
 
@@ -3314,6 +3322,20 @@ def _prepare_user_subscription_data(
             )
             user = fetch_user_with_configs(db, telegram_id) or user
             active_configs = _active_subscription_configs(user, max_configs)
+
+    # First-time HApp import may come before any bot-created device exists.
+    # Bootstrap one stable device so subscription import works from zero state.
+    if (client_app_name == "happ" or force_pool_all) and not active_configs:
+        _provision_single_auto_device_config(
+            db,
+            user,
+            "happ_main",
+            max_configs=max_configs,
+            timeout_seconds=6.0,
+            total_timeout_seconds=35.0,
+        )
+        user = fetch_user_with_configs(db, telegram_id) or user
+        active_configs = _active_subscription_configs(user, max_configs)
 
     # HApp should import full server pool for the account, not just one device slice.
     # Pick one latest active config per server to avoid duplicate entries for the same node.
@@ -5164,7 +5186,7 @@ def _probe_vpn_tcp_latency_ms(host: str, port: int, timeout_seconds: float = 0.8
 def _check_server_runtime(server: VpnServer) -> dict[str, Any]:
     try:
         protocol = server_protocol(server)
-        service_name = "hysteria-server" if protocol == SERVER_PROTOCOL_HYSTERIA2 else "xray"
+        service_name = server_service_name(server)
         version_cmd = "hysteria version 2>/dev/null | head -n 1 || true"
         if protocol != SERVER_PROTOCOL_HYSTERIA2:
             version_cmd = "xray version 2>/dev/null | head -n 1 || true"
@@ -8349,6 +8371,10 @@ def _render_admin_settings_page(snapshot: dict[str, Any], msg_text: str = "", er
     channel_items = [
         ("Welcome channel URL", settings.welcome_channel_url),
         ("Welcome channel chat", settings.welcome_channel_chat),
+        ("Telegram proxy host", settings.telegram_proxy_host or "-"),
+        ("Telegram proxy port", settings.telegram_proxy_port),
+        ("Telegram proxy secret", _mask_secret(settings.telegram_proxy_secret)),
+        ("Telegram proxy link override", settings.telegram_proxy_link or "-"),
         ("HApp import URL template", settings.happ_import_url_template),
         ("HApp download URL", settings.happ_download_url),
     ]
@@ -8410,6 +8436,10 @@ def _render_admin_settings_page(snapshot: dict[str, Any], msg_text: str = "", er
         "<div class='sub-form'>"
         f"{_settings_input_row('Welcome channel URL', 'welcome_channel_url', settings.welcome_channel_url)}"
         f"{_settings_input_row('Welcome channel chat', 'welcome_channel_chat', settings.welcome_channel_chat)}"
+        f"{_settings_input_row('Telegram proxy host', 'telegram_proxy_host', settings.telegram_proxy_host)}"
+        f"{_settings_input_row('Telegram proxy port', 'telegram_proxy_port', settings.telegram_proxy_port, input_type='number')}"
+        f"{_settings_input_row('Telegram proxy secret', 'telegram_proxy_secret', '', input_type='password', placeholder='(unchanged)', note=f'Current: {_mask_secret(settings.telegram_proxy_secret)}')}"
+        f"{_settings_input_row('Telegram proxy link override', 'telegram_proxy_link', settings.telegram_proxy_link, note='Если заполнено, будет использоваться вместо host/port/secret.')}"
         f"{_settings_input_row('HApp import URL template', 'happ_import_url_template', settings.happ_import_url_template)}"
         f"{_settings_input_row('HApp download URL', 'happ_download_url', settings.happ_download_url)}"
         f"{_settings_input_row('Bot token', 'bot_token', '', input_type='password', placeholder='(unchanged)', note=f'Current: {_mask_secret(settings.bot_token)}')}"
@@ -9103,6 +9133,7 @@ async def admin_settings_update(request: Request):
         "platega_payment_method_crypto",
         "platega_payment_method_card",
         "platega_payment_method_sbp",
+        "telegram_proxy_port",
         "MAX_ACTIVE_CONFIGS_PER_USER",
     }
     secret_fields = {
@@ -9114,6 +9145,7 @@ async def admin_settings_update(request: Request):
         "yoomoney_notification_secret",
         "platega_merchant_id",
         "platega_api_key",
+        "telegram_proxy_secret",
     }
     allowed_fields = {
         "database_url",
@@ -9155,6 +9187,10 @@ async def admin_settings_update(request: Request):
         "platega_failed_url",
         "welcome_channel_url",
         "welcome_channel_chat",
+        "telegram_proxy_host",
+        "telegram_proxy_port",
+        "telegram_proxy_secret",
+        "telegram_proxy_link",
         "happ_import_url_template",
         "happ_download_url",
         "bot_token",
@@ -9607,6 +9643,9 @@ def admin_settings_api(request: Request, db: Session = Depends(get_db)):
             "platega_failed_url": settings.platega_failed_url,
             "welcome_channel_url": settings.welcome_channel_url,
             "welcome_channel_chat": settings.welcome_channel_chat,
+            "telegram_proxy_host": settings.telegram_proxy_host,
+            "telegram_proxy_port": int(settings.telegram_proxy_port),
+            "telegram_proxy_link": settings.telegram_proxy_link,
             "happ_import_url_template": settings.happ_import_url_template,
             "happ_download_url": settings.happ_download_url,
         },
@@ -9618,6 +9657,7 @@ def admin_settings_api(request: Request, db: Session = Depends(get_db)):
             "yoomoney_notification_secret": _mask_secret(settings.yoomoney_notification_secret),
             "platega_merchant_id": _mask_secret(settings.platega_merchant_id),
             "platega_api_key": _mask_secret(settings.platega_api_key),
+            "telegram_proxy_secret": _mask_secret(settings.telegram_proxy_secret),
             "bot_token": _mask_secret(settings.bot_token),
         },
     }
@@ -11109,6 +11149,49 @@ def _welcome_channel_chat_id() -> str:
     return "@trumpxvpn"
 
 
+def build_telegram_proxy_url() -> str:
+    direct_link = str(settings.telegram_proxy_link or "").strip()
+    if direct_link.startswith(("https://", "http://", "tg://")):
+        return direct_link
+    host = str(settings.telegram_proxy_host or "").strip()
+    secret = str(settings.telegram_proxy_secret or "").strip()
+    try:
+        port = int(settings.telegram_proxy_port or 0)
+    except Exception:
+        port = 0
+    if not host or not secret or port <= 0:
+        return ""
+    return (
+        f"https://t.me/proxy?server={quote(host, safe='')}"
+        f"&port={port}"
+        f"&secret={quote(secret, safe='')}"
+    )
+
+
+def telegram_proxy_is_configured() -> bool:
+    return bool(build_telegram_proxy_url())
+
+
+def telegram_proxy_access_kb() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if str(settings.welcome_channel_url or "").strip():
+        rows.append([InlineKeyboardButton(text="📢 Подписаться на канал", url=settings.welcome_channel_url)])
+    rows.append([InlineKeyboardButton(text="✅ Проверить доступ", callback_data="tgproxy:check")])
+    rows.append([InlineKeyboardButton(text="⬅️ К подключению", callback_data="menu:connect")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def telegram_proxy_kb() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    proxy_url = build_telegram_proxy_url()
+    if proxy_url.startswith(("https://", "http://", "tg://")):
+        rows.append([InlineKeyboardButton(text="🛡 Открыть proxy", url=proxy_url)])
+    if str(settings.welcome_channel_url or "").strip():
+        rows.append([InlineKeyboardButton(text="📢 Канал", url=settings.welcome_channel_url)])
+    rows.append([InlineKeyboardButton(text="⬅️ К подключению", callback_data="menu:connect")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def welcome_bonus_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -11225,27 +11308,82 @@ def topup_cancel_kb() -> InlineKeyboardMarkup:
 
 
 def connect_inactive_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="рџ’і РџРµСЂРµР№С‚Рё Рє РѕРїР»Р°С‚Рµ",
-                    callback_data="menu:balance",
-                )
-            ],
-            [InlineKeyboardButton(text="рџ’і РџРѕРїРѕР»РЅРёС‚СЊ РЅР° РґСЂСѓРіСѓСЋ СЃСѓРјРјСѓ", callback_data="topup:start")],
-            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
-        ]
-    )
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="рџ’і РџРµСЂРµР№С‚Рё Рє РѕРїР»Р°С‚Рµ",
+                callback_data="menu:balance",
+            )
+        ],
+        [InlineKeyboardButton(text="рџ’і РџРѕРїРѕР»РЅРёС‚СЊ РЅР° РґСЂСѓРіСѓСЋ СЃСѓРјРјСѓ", callback_data="topup:start")],
+    ]
+    if telegram_proxy_is_configured():
+        rows.append([InlineKeyboardButton(text="🛡 Telegram Proxy", callback_data="connect:tgproxy")])
+    rows.append([InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def connect_active_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="рџ”‘ РљР»СЋС‡ РїРѕРґРєР»СЋС‡РµРЅРёСЏ", callback_data="connect:sub")],
-            [InlineKeyboardButton(text="рџ’» РЈСЃС‚СЂРѕР№СЃС‚РІР°", callback_data="connect:devices")],
-            [InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")],
-        ]
+    rows = [
+        [InlineKeyboardButton(text="рџ”‘ РљР»СЋС‡ РїРѕРґРєР»СЋС‡РµРЅРёСЏ", callback_data="connect:sub")],
+        [InlineKeyboardButton(text="рџ’» РЈСЃС‚СЂРѕР№СЃС‚РІР°", callback_data="connect:devices")],
+    ]
+    if telegram_proxy_is_configured():
+        rows.append([InlineKeyboardButton(text="🛡 Telegram Proxy", callback_data="connect:tgproxy")])
+    rows.append([InlineKeyboardButton(text="в¬…пёЏ Р’ РјРµРЅСЋ", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_telegram_proxy_access(bot: Bot, message: Message, telegram_id: int) -> None:
+    proxy_url = build_telegram_proxy_url()
+    if not proxy_url:
+        await _upsert_message(
+            message,
+            "Telegram proxy пока не настроен. Добавь host, port и secret в настройках сервиса.",
+            reply_markup=connect_inactive_kb(),
+        )
+        return
+    subscribed = await _is_user_subscribed_to_welcome_channel(bot, telegram_id)
+    if not subscribed:
+        await _upsert_message(
+            message,
+            (
+                "Telegram proxy доступен бесплатно для подписчиков канала.\n\n"
+                f"Сначала подпишись: {settings.welcome_channel_url}\n"
+                "После этого нажми «Проверить доступ»."
+            ),
+            reply_markup=telegram_proxy_access_kb(),
+            disable_web_page_preview=True,
+        )
+        return
+
+    host = str(settings.telegram_proxy_host or "").strip() or "-"
+    secret = str(settings.telegram_proxy_secret or "").strip() or "-"
+    try:
+        port = int(settings.telegram_proxy_port or 0)
+    except Exception:
+        port = 0
+    lines = [
+        "Telegram proxy активирован.",
+        "Доступ бесплатный, пока пользователь подписан на канал.",
+        "",
+        f"Ссылка: {proxy_url}",
+    ]
+    if host != "-" and secret != "-" and port > 0:
+        lines.extend(
+            [
+                "",
+                "Если ссылка не откроется автоматически, добавь proxy вручную:",
+                f"Server: {host}",
+                f"Port: {port}",
+                f"Secret: {secret}",
+            ]
+        )
+    await _upsert_message(
+        message,
+        "\n".join(lines),
+        reply_markup=telegram_proxy_kb(),
+        disable_web_page_preview=True,
     )
 
 
@@ -12691,6 +12829,24 @@ async def connect_subscription_link_callback(callback: CallbackQuery):
         return
     await send_subscription_link(callback.message, callback.from_user.id)
     await callback.answer()
+
+
+@router.callback_query(F.data == "connect:tgproxy")
+async def connect_telegram_proxy_callback(callback: CallbackQuery):
+    if not callback.message:
+        await callback.answer("Нет контекста сообщения", show_alert=True)
+        return
+    await send_telegram_proxy_access(callback.bot, callback.message, callback.from_user.id)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tgproxy:check")
+async def telegram_proxy_check_callback(callback: CallbackQuery):
+    if not callback.message:
+        await callback.answer("Нет контекста сообщения", show_alert=True)
+        return
+    await send_telegram_proxy_access(callback.bot, callback.message, callback.from_user.id)
+    await callback.answer("Доступ проверен")
 
 
 @router.callback_query(F.data == "connect:devices")
