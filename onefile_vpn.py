@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     giveaway_admin_telegram_id: int = 0
     admin_panel_password: str = "change_me_admin_password"
     admin_session_secret: str = "change_me_admin_session_secret"
+    subscription_token_secret: str = ""
     admin_session_hours: int = 24
     subscription_price_rub: int = 199
     subscription_days_per_month: int = 30
@@ -684,6 +685,26 @@ def _session_secret() -> str:
     return settings.admin_session_secret or settings.internal_api_token
 
 
+def _subscription_token_secrets() -> list[str]:
+    # Keep subscription token signing stable across deployments.
+    # Legacy fallbacks let old links continue working after secret changes.
+    candidates = [
+        str(settings.subscription_token_secret or "").strip(),
+        str(settings.admin_session_secret or "").strip(),
+        str(settings.internal_api_token or "").strip(),
+        str(settings.bot_token or "").strip(),
+    ]
+    secrets: list[str] = []
+    for item in candidates:
+        if item and item not in secrets:
+            secrets.append(item)
+    return secrets or ["change_me_subscription_secret"]
+
+
+def _primary_subscription_token_secret() -> str:
+    return _subscription_token_secrets()[0]
+
+
 def _sign_session(raw_payload: str) -> str:
     return hmac.new(_session_secret().encode("utf-8"), raw_payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -925,12 +946,20 @@ def _public_cabinet_payload(db: Session, user: User) -> dict[str, Any]:
 
 def make_user_subscription_token(telegram_id: int) -> str:
     raw = f"sub:{int(telegram_id)}"
-    return hmac.new(_session_secret().encode("utf-8"), raw.encode("utf-8"), hashlib.sha256).hexdigest()
+    secret = _primary_subscription_token_secret()
+    return hmac.new(secret.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def verify_user_subscription_token(telegram_id: int, token: str) -> bool:
-    expected = make_user_subscription_token(telegram_id)
-    return bool(token) and hmac.compare_digest(expected, str(token))
+    token_value = str(token or "").strip()
+    if not token_value:
+        return False
+    raw = f"sub:{int(telegram_id)}"
+    for secret in _subscription_token_secrets():
+        expected = hmac.new(secret.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(expected, token_value):
+            return True
+    return False
 
 
 def public_api_base_url() -> str:
@@ -3330,6 +3359,23 @@ def _prepare_user_subscription_data(
             db,
             user,
             "happ_main",
+            max_configs=max_configs,
+            timeout_seconds=6.0,
+            total_timeout_seconds=35.0,
+        )
+        user = fetch_user_with_configs(db, telegram_id) or user
+        active_configs = _active_subscription_configs(user, max_configs)
+
+    # Final safety net: if no active configs exist for any client yet, bootstrap one
+    # default device automatically (covers first import/open for brand-new users).
+    if not active_configs:
+        fallback_device_name = str(requested_device_name or "").strip()
+        if not fallback_device_name:
+            fallback_device_name = "happ_main" if (client_app_name == "happ" or force_pool_all) else "auto_main"
+        _provision_single_auto_device_config(
+            db,
+            user,
+            fallback_device_name,
             max_configs=max_configs,
             timeout_seconds=6.0,
             total_timeout_seconds=35.0,
